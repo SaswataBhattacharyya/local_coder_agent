@@ -116,3 +116,32 @@ context_ingest:
   chunk_overlap: 200
   top_k: 6
 ```
+
+## Agent State Branching
+
+Agent state is stored under `.agent/state/` and is separate from git branches.
+Each session has branches with its own pending patch and notes.
+
+Layout:
+```
+.agent/state/sessions/<session_id>/active_branch.txt
+.agent/state/sessions/<session_id>/branches/<branch>/pending_patch.json
+.agent/state/sessions/<session_id>/branches/<branch>/repo_map/
+```
+
+## Background Tasks
+
+Durable queue stored under:
+```
+.agent/tasks/tasks.jsonl
+.agent/tasks/<task_id>/{meta.json,logs.jsonl,result.json}
+```
+Worker status:
+```
+GET /worker/status
+```
+Includes: `started_at`, `thread_id`, `current_task`, `last_error`.
+Worker mode (optional):
+```
+python -m server.worker --repo /path/to/repo
+```

@@ -102,3 +102,10 @@ You can print setup steps based on environment:
 ```bash
 python3 scripts/print_setup_steps.py
 ```
+
+## Background Worker (Optional)
+
+For Runpod, you can run a separate worker process:
+```bash
+python -m server.worker --repo /path/to/repo
+```

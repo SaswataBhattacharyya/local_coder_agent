@@ -16,6 +16,7 @@ SUPPORTED = {
     ".yml": "yaml",
 }
 
+EXCLUDE_DIRS = {".git", "node_modules", "venv", ".venv", "dist", "build", "__pycache__", ".agent", ".agent_index", ".agent_staging"}
 @dataclass
 class SymbolIndexer:
     repo_root: Path
@@ -75,6 +76,8 @@ class SymbolIndexer:
     def _iter_supported_files(self) -> Iterable[Path]:
         for p in self.repo_root.rglob("*"):
             if not p.is_file():
+                continue
+            if any(part in EXCLUDE_DIRS for part in p.parts):
                 continue
             lang = SUPPORTED.get(p.suffix)
             if not lang:

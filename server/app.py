@@ -6,6 +6,9 @@ import os
 import subprocess
 import re
 import uuid
+import json
+import time
+import sqlite3
 
 from agent.config import load_config
 from agent.planner import QueryPlanner
@@ -15,6 +18,10 @@ from agent.llm_router import chat as llm_chat
 from agent.model_registry import list_models, set_selected
 from agent.context_ingest import ingest_and_store
 from rlm_wrap.store import RLMVarStore
+from agent.state_store import AgentStateStore
+from indexer.dep_graph import DependencyGraph
+from indexer.repo_map import RepoMapBuilder
+from server.tasks import TaskQueue, TaskWorker
 from rlm_wrap.context import reset_context, build_minimal_meta
 from mcp.registry import MCPRegistry
 from mcp.policy import load_policy, load_state, save_state, is_risky_tool
@@ -80,6 +87,11 @@ STATE = {
     "pending_summary": "",
     "pending_risk": "",
     "mcp_allowed": False,
+    "session_id": None,
+    "state_store": None,
+    "dep_graph": None,
+    "task_queue": None,
+    "task_worker": None,
 }
 
 @app.post("/init")
@@ -103,12 +115,14 @@ def init(req: InitRequest):
     git.ensure_repo()
     staging = StagingArea(repo_root=repo, staging_root=repo / ".agent" / "staging")
     indexer = SymbolIndexer(repo_root=repo, db_path=repo / ".agent" / "index.sqlite")
+    dep_graph = DependencyGraph(repo_root=repo, db_path=repo / ".agent" / "deps.sqlite")
+    dep_graph.init_db()
     if indexer.db_path.exists():
         indexer.index_incremental()
     else:
         indexer.index_all()
 
-    STATE.update(repo_root=str(repo), git=git, staging=staging, indexer=indexer, pending_diff=None)
+    STATE.update(repo_root=str(repo), git=git, staging=staging, indexer=indexer, pending_diff=None, dep_graph=dep_graph)
     STATE["session"] = AgentSession(state=AgentState.IDLE)
     mcp_state = load_state(repo)
     STATE["mcp_allowed"] = bool(mcp_state.get("mcp_allowed", False))
@@ -120,6 +134,15 @@ def init(req: InitRequest):
         index_path=indexer.db_path,
     )
     reset_context(repo, minimal)
+    STATE["session_id"] = "default"
+    store = AgentStateStore(repo_root=repo, session_id="default")
+    store.ensure_session("main")
+    STATE["state_store"] = store
+    STATE["task_queue"] = TaskQueue(repo)
+    if STATE.get("task_worker") is None or not STATE["task_worker"].is_alive():
+        worker = TaskWorker(STATE["task_queue"], _handle_task)
+        worker.start()
+        STATE["task_worker"] = worker
     return {"status":"ok", "repo_root": str(repo), "restore_points": git.list_restore_points()}
 
 @app.post("/restore_remote")
@@ -165,6 +188,7 @@ def restore_remote(req: RestoreRemoteRequest):
 def query(req: QueryRequest):
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
+    _ensure_repo_map()
     planner = QueryPlanner(STATE["session"])
     result = planner.analyze(req.user_text)
     plan = result.plan
@@ -185,6 +209,7 @@ def query(req: QueryRequest):
 def propose(req: ProposeRequest):
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
+    _ensure_repo_map()
     external_context = _context_bundle_to_text(req.context)
     mcp_query = req.mcp_query
     if not mcp_query and _should_use_mcp(req.instruction):
@@ -199,6 +224,12 @@ def propose(req: ProposeRequest):
     STATE["pending_diff"] = proposal.diff
     STATE["pending_summary"] = proposal.summary
     STATE["pending_risk"] = proposal.risk_notes
+    if STATE.get("state_store"):
+        STATE["state_store"].write_pending_patch({
+            "diff": proposal.diff,
+            "summary": proposal.summary,
+            "risk": proposal.risk_notes,
+        })
     touched = _touched_files(proposal.diff)
     return {
         "status":"ok",
@@ -238,6 +269,12 @@ def revise_pending(req: ReviseRequest):
     STATE["pending_diff"] = proposal.diff
     STATE["pending_summary"] = proposal.summary
     STATE["pending_risk"] = proposal.risk_notes
+    if STATE.get("state_store"):
+        STATE["state_store"].write_pending_patch({
+            "diff": proposal.diff,
+            "summary": proposal.summary,
+            "risk": proposal.risk_notes,
+        })
     touched = _touched_files(proposal.diff)
     return {
         "status":"ok",
@@ -461,6 +498,69 @@ def _reload_mcp_config(repo_root: Path) -> None:
     MCP_REGISTRY.reload()
     MCP_POLICY = load_policy(MCP_REGISTRY.config_path)
 
+
+def _ensure_repo_map() -> None:
+    if STATE.get("state_store") is None:
+        return
+    store: AgentStateStore = STATE["state_store"]
+    branch = store.get_active_branch()
+    repo_map_path = store.branch_root(branch) / "repo_map" / "repo_map.json"
+    if not repo_map_path.exists():
+        _build_repo_map(full=True)
+
+
+def _build_repo_map(full: bool = False) -> None:
+    repo_root = Path(STATE["repo_root"])
+    dep_graph: DependencyGraph = STATE["dep_graph"]
+    store: AgentStateStore = STATE["state_store"]
+    repo_map_dir = store.branch_root(store.get_active_branch()) / "repo_map"
+    cache_path = repo_map_dir / "cache.json"
+    if full:
+        for p in repo_root.rglob("*"):
+            if p.is_file() and p.suffix in (".py", ".js", ".ts", ".tsx"):
+                dep_graph.update_file(p)
+        cache = {}
+    else:
+        cache = {}
+        if cache_path.exists():
+            try:
+                cache = json.loads(cache_path.read_text())
+            except Exception:
+                cache = {}
+        con = sqlite3.connect(STATE["indexer"].db_path)
+        cur = con.cursor()
+        rows = cur.execute("SELECT path, mtime FROM files").fetchall()
+        con.close()
+        for rel, mtime in rows:
+            prev = cache.get(rel)
+            if prev is None or float(prev) != float(mtime):
+                p = repo_root / rel
+                if p.exists():
+                    dep_graph.update_file(p)
+            cache[rel] = float(mtime)
+    repo_map_dir.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache, indent=2))
+    builder = RepoMapBuilder(repo_root=repo_root, index_db=STATE["indexer"].db_path, dep_db=dep_graph.db_path)
+    builder.build(repo_map_dir)
+
+
+def _handle_task(task: dict) -> dict:
+    t = task.get("type")
+    payload = task.get("payload") or {}
+    if t == "REPO_MAP_REBUILD":
+        _build_repo_map(full=bool(payload.get("full", False)))
+        return {"ok": True}
+    if t == "QUERY":
+        req = QueryRequest(**payload)
+        return query(req)
+    if t == "PROPOSE":
+        req = ProposeRequest(**payload)
+        return propose(req)
+    if t == "REVISE_PENDING":
+        req = ReviseRequest(**payload)
+        return revise_pending(req)
+    return {"ok": False, "error": f"unknown task type: {t}"}
+
 @app.post("/approve")
 def approve(req: ApproveRequest):
     if STATE["repo_root"] is None:
@@ -493,6 +593,12 @@ def approve(req: ApproveRequest):
     STATE["pending_diff"] = None
     STATE["pending_summary"] = ""
     STATE["pending_risk"] = ""
+    if STATE.get("state_store"):
+        STATE["state_store"].clear_pending_patch()
+        try:
+            STATE["state_store"].snapshot(sha, message="approved")
+        except Exception:
+            pass
     minimal = build_minimal_meta(
         repo_root=Path(STATE["repo_root"]),
         head=sha,
@@ -515,6 +621,8 @@ def reject():
     STATE["pending_diff"] = None
     STATE["pending_summary"] = ""
     STATE["pending_risk"] = ""
+    if STATE.get("state_store"):
+        STATE["state_store"].clear_pending_patch()
     return {"status":"ok"}
 
 @app.get("/restore_points")
@@ -554,6 +662,131 @@ def reset_context_endpoint():
     STATE["pending_risk"] = ""
     STATE["session"] = AgentSession(state=AgentState.IDLE)
     return {"status": "ok"}
+
+@app.post("/session/start")
+def session_start(req: SessionStartRequest):
+    repo = Path(req.repo_root).resolve()
+    sid = f"session_{int(time.time())}"
+    store = AgentStateStore(repo_root=repo, session_id=sid)
+    store.ensure_session("main")
+    STATE["session_id"] = sid
+    STATE["state_store"] = store
+    return {"session_id": sid, "active_branch": store.get_active_branch()}
+
+@app.get("/session/status")
+def session_status():
+    if STATE.get("state_store") is None:
+        raise HTTPException(400, "no session")
+    store: AgentStateStore = STATE["state_store"]
+    return {
+        "session_id": STATE.get("session_id"),
+        "active_branch": store.get_active_branch(),
+        "branches": store.list_branches(),
+    }
+
+@app.post("/branch/create")
+def branch_create(req: BranchCreateRequest):
+    if STATE.get("state_store") is None:
+        raise HTTPException(400, "no session")
+    store: AgentStateStore = STATE["state_store"]
+    store.ensure_session(req.name)
+    return {"status": "ok", "branch": req.name}
+
+@app.post("/branch/switch")
+def branch_switch(req: BranchSwitchRequest):
+    if STATE.get("state_store") is None:
+        raise HTTPException(400, "no session")
+    store: AgentStateStore = STATE["state_store"]
+    store.switch_branch(req.name)
+    pending = store.read_pending_patch()
+    STATE["pending_diff"] = pending.get("diff")
+    STATE["pending_summary"] = pending.get("summary", "")
+    STATE["pending_risk"] = pending.get("risk", "")
+    return {"status": "ok", "active_branch": store.get_active_branch()}
+
+@app.post("/agent_state/snapshot")
+def agent_state_snapshot(req: SnapshotRequest):
+    if STATE.get("state_store") is None:
+        raise HTTPException(400, "no session")
+    store: AgentStateStore = STATE["state_store"]
+    snap = store.snapshot(STATE["git"].get_head(), message=req.message or "")
+    return {"snapshot_id": snap}
+
+@app.post("/agent_state/restore")
+def agent_state_restore(req: SnapshotRestoreRequest):
+    if STATE.get("state_store") is None:
+        raise HTTPException(400, "no session")
+    store: AgentStateStore = STATE["state_store"]
+    store.restore_snapshot(req.snapshot_id)
+    pending = store.read_pending_patch()
+    STATE["pending_diff"] = pending.get("diff")
+    STATE["pending_summary"] = pending.get("summary", "")
+    STATE["pending_risk"] = pending.get("risk", "")
+    return {"status": "ok"}
+
+@app.get("/repo_map")
+def repo_map():
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
+    store: AgentStateStore = STATE["state_store"]
+    branch = store.get_active_branch()
+    repo_map_path = store.branch_root(branch) / "repo_map" / "repo_map.json"
+    if not repo_map_path.exists():
+        _build_repo_map(full=True)
+    return json.loads(repo_map_path.read_text())
+
+@app.post("/repo_map/rebuild")
+def repo_map_rebuild(req: RepoMapRebuildRequest):
+    _build_repo_map(full=req.full)
+    return {"status": "ok"}
+
+@app.post("/task/submit")
+def task_submit(req: TaskSubmitRequest):
+    if STATE.get("task_queue") is None:
+        raise HTTPException(400, "init first")
+    tid = STATE["task_queue"].submit(req.type, req.payload)
+    return {"task_id": tid}
+
+@app.post("/task/status")
+def task_status(req: TaskStatusRequest):
+    if STATE.get("task_queue") is None:
+        raise HTTPException(400, "init first")
+    return STATE["task_queue"].status(req.task_id)
+
+@app.get("/task/list")
+def task_list(limit: int = 50):
+    if STATE.get("task_queue") is None:
+        raise HTTPException(400, "init first")
+    return {"tasks": STATE["task_queue"].list(limit=limit)}
+
+@app.post("/task/cancel")
+def task_cancel(req: TaskCancelRequest):
+    if STATE.get("task_queue") is None:
+        raise HTTPException(400, "init first")
+    STATE["task_queue"].cancel(req.task_id)
+    return {"status": "ok"}
+
+@app.post("/task/logs")
+def task_logs(req: TaskLogsRequest):
+    if STATE.get("task_queue") is None:
+        raise HTTPException(400, "init first")
+    return {"logs": STATE["task_queue"].read_logs(req.task_id, req.after)}
+
+@app.get("/worker/status")
+def worker_status():
+    w = STATE.get("task_worker")
+    if w is None:
+        return {"running": False}
+    return {
+        "running": w.is_alive(),
+        "last_tick": getattr(w, "last_tick", None),
+        "processed": getattr(w, "processed", 0),
+        "current_task": getattr(w, "current_task", ""),
+        "last_error": getattr(w, "last_error", ""),
+        "started_at": getattr(w, "started_at", None),
+        "thread_id": getattr(w, "ident", None),
+        "queue_size": len(STATE["task_queue"].list(limit=1000)) if STATE.get("task_queue") else 0,
+    }
 
 @app.get("/models")
 def get_models():
@@ -598,6 +831,39 @@ class MCPRevokeRequest(BaseModel):
 class ModelSelectRequest(BaseModel):
     role: str
     model_id: str
+
+class SessionStartRequest(BaseModel):
+    repo_root: str
+
+class BranchCreateRequest(BaseModel):
+    name: str
+    from_branch: str | None = None
+
+class BranchSwitchRequest(BaseModel):
+    name: str
+
+class SnapshotRequest(BaseModel):
+    message: str | None = None
+
+class SnapshotRestoreRequest(BaseModel):
+    snapshot_id: str
+
+class RepoMapRebuildRequest(BaseModel):
+    full: bool = False
+
+class TaskSubmitRequest(BaseModel):
+    type: str
+    payload: dict
+
+class TaskStatusRequest(BaseModel):
+    task_id: str
+
+class TaskCancelRequest(BaseModel):
+    task_id: str
+
+class TaskLogsRequest(BaseModel):
+    task_id: str
+    after: float | None = None
 
 class MCPStatusResponse(BaseModel):
     mcp_allowed: bool

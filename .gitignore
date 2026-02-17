@@ -5,3 +5,6 @@ models/
 .agent_staging/
 .agent_stateless/
 keys.env
+prompt.txt
+prompt2.txt
+prompt3.txt

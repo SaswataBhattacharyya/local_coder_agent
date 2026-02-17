@@ -15,6 +15,13 @@
 - `GET /models` returns model lists
 - `POST /models/select` updates selection
 - `POST /mcp/reload` reloads config
+- `/session/start`, `/branch/create`, `/branch/switch` work
+- `/agent_state/snapshot` + `/agent_state/restore` work
+- `/repo_map` returns summary
+- `/repo_map/rebuild` works
+- `/task/submit` -> `/task/status` -> `/task/logs` works
+- `GET /worker/status` returns running + stats
+  - includes started_at + thread_id
 
 ## VSCode Extension
 - Ping Server updates status
