@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Tuple
 import json
 import os
 import re
+import yaml
 
 
 STATE_FILE = "mcp_state.json"
@@ -16,10 +17,14 @@ class MCPPolicy:
 
 
 def load_policy(config_path: Path) -> MCPPolicy:
-    data = json.loads(json.dumps({}))
+    if not config_path.exists():
+        return MCPPolicy(allowed_domains=[])
+    data: Dict[str, Any] = {}
     try:
-        import yaml
-        data = yaml.safe_load(config_path.read_text()) or {}
+        if config_path.suffix.lower() == ".json":
+            data = json.loads(config_path.read_text())
+        else:
+            data = yaml.safe_load(config_path.read_text()) or {}
     except Exception:
         data = {}
     policy = data.get("policy") or {}

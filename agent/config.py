@@ -29,6 +29,14 @@ class RestoreCfg:
     push_on_approve: bool = True
 
 @dataclass
+class ContextIngestCfg:
+    enabled: bool = True
+    max_chars: int = 12000
+    chunk_size: int = 2000
+    chunk_overlap: int = 200
+    top_k: int = 6
+
+@dataclass
 class AppConfig:
     paths: PathsCfg
     reasoner: ModelCfg
@@ -36,6 +44,8 @@ class AppConfig:
     vlm: ModelCfg
     runtime: RuntimeCfg
     restore: RestoreCfg
+    model_registry: dict
+    context_ingest: ContextIngestCfg
 
 def load_config(path: Path) -> AppConfig:
     data = yaml.safe_load(path.read_text())
@@ -50,4 +60,6 @@ def load_config(path: Path) -> AppConfig:
     vlm = ModelCfg(**m["vlm"])
     runtime = RuntimeCfg(**data.get("runtime", {}))
     restore = RestoreCfg(**data.get("restore", {}))
-    return AppConfig(paths=paths, reasoner=reasoner, coder=coder, vlm=vlm, runtime=runtime, restore=restore)
+    model_registry = data.get("model_registry", {})
+    context_ingest = ContextIngestCfg(**data.get("context_ingest", {}))
+    return AppConfig(paths=paths, reasoner=reasoner, coder=coder, vlm=vlm, runtime=runtime, restore=restore, model_registry=model_registry, context_ingest=context_ingest)

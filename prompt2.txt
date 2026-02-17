@@ -1,0 +1,133 @@
+You are working in an EXISTING repo: https://github.com/SaswataBhattacharyya/local_coder_agent
+
+DO NOT rewrite the existing server scaffold. Extend it cleanly.
+
+CURRENT STATE (already implemented)
+- Repo contains:
+  - FastAPI server (server/) with endpoints like /init, /query, /propose, /revise_pending, /approve, /reject, /pending, /restore_points, /revert, /reset_context
+  - bootstrap.py that sets up venv, installs deps, detects VRAM, downloads GGUF models, starts uvicorn
+  - MCP optional bridge (mcp/) with endpoints like /mcp/allow, /mcp/status, /mcp/revoke (YES-gated)
+  - restore-remote support is present in README (optional)
+- This repo is meant to run locally OR in a VM/Runpod.
+- User wants a Cursor-like UX inside VSCode: right-side chat panel, apply diffs to local workspace, approve/reject, etc.
+
+PRIMARY GOAL (next milestone)
+Build a VSCode extension (TypeScript) that provides a Cursor-style coding agent UI in a RIGHT SIDEBAR panel and talks to the agent server (local OR VM/Runpod) via HTTP/HTTPS, but the user experience stays INSIDE VSCode (no browser interaction required).
+
+CASE 1 ARCHITECTURE (required)
+- The codebase is the LOCAL VSCode workspace.
+- The extension reads files locally (VSCode APIs) and applies patches locally.
+- The remote server does NOT need access to the local filesystem; it only generates plans and unified diffs.
+- The extension owns:
+  - context gathering (minimal snippets)
+  - diff preview UX
+  - patch apply (git apply preferred)
+  - optional local git commit
+- The server owns:
+  - /query planning & clarifications
+  - /propose diff generation
+  - /revise_pending diff adjustments
+  - /reset_context
+  - optional MCP browsing (YES-gated) when needed by planner/coder
+
+IMPORTANT: two setup modes must be supported and documented
+1) LOCAL MODE (no VM/Runpod):
+   - user runs: python3 bootstrap.py
+   - serverUrl in VSCode = http://127.0.0.1:8010
+2) VM/RUNPOD MODE:
+   - user runs bootstrap.py in VM/Runpod
+   - VSCode extension must still work with minimal extra steps.
+   - Provide TWO supported connectivity options:
+     A) Public Runpod endpoint (expose port 8010) and set serverUrl to https://<runpod-url>
+     B) No public exposure: SSH tunnel / port-forward so serverUrl remains http://127.0.0.1:8010 locally.
+   - README must ask the user which option they chose and give exact commands.
+
+REQUIREMENT: README / setup must be interactive (guides)
+- Update README.md and/or add docs/SETUP.md so it clearly asks:
+  - Are you setting up Local or VM/Runpod?
+  - If VM/Runpod: choose Public endpoint or SSH tunnel
+  - Then provide exact steps for each path.
+- Add a small helper script if needed:
+  - scripts/vscode_setup_helper.py or scripts/print_setup_steps.py
+  - It can detect environment (presence of RUNPOD env vars) and print correct steps.
+- This is NOT optional: the user wants Codex to generate correct setup guides for both modes.
+
+VSCode EXTENSION UX REQUIREMENTS (Cursor-like)
+- Right sidebar webview (Activity Bar view or side panel view)
+- Chat bubbles (user/assistant)
+- Text input + Send
+- Sections:
+  - Conversation
+  - Pending Patch (diff text + summary + risk notes)
+  - Actions (buttons)
+  - Connection status (server URL, ping)
+- Buttons/commands:
+  - Propose
+  - Revise Pending
+  - Approve Pending (applies patch locally)
+  - Reject Pending
+  - Reset Context (calls server /reset_context)
+  - MCP Allow (prompts YES and calls /mcp/allow)
+  - MCP Revoke
+  - MCP Status
+  - Ping Server
+
+NETWORK/SECURITY
+- Extension must have settings in package.json:
+  - localCodeAgent.serverUrl (string, required)
+  - localCodeAgent.apiKey (optional; if set, send Authorization: Bearer <key>)
+  - localCodeAgent.useGitApply (default true)
+  - localCodeAgent.sendContextBundle (default false for compatibility)
+- Extension must work without opening Swagger/docs in a browser.
+
+CONTEXT GATHERING (minimal context; feature-flagged)
+- Implement context gathering using VSCode APIs:
+  - active editor selection (or full open file)
+  - workspace search (VSCode search API) similar to ripgrep
+  - optionally: include small snippets around matches
+- Compatibility mode:
+  - If sendContextBundle=false, send only { user_text } to /propose and /revise_pending
+  - If true, send { user_text, context: { files: [...], snippets: [...] } }
+- Do not send whole repos.
+
+PATCH APPLY REQUIREMENTS
+- When server returns unified diff:
+  - do NOT auto-apply
+  - show diff in webview
+  - user must click Approve
+- Approve should apply patch locally:
+  Option A (preferred): if workspace is a git repo and git exists, run `git apply` in workspace (only for patch apply; no other shell commands)
+  Option B (fallback): parse unified diff and apply via VSCode WorkspaceEdit
+- Show errors clearly if patch fails and offer “Open Diff” preview.
+
+COMMAND GATING
+- Extension must NOT run arbitrary shell commands.
+- Only permitted command in MVP is `git apply` (if user enabled useGitApply=true).
+- No tests/build commands from extension in MVP.
+
+DELIVERABLES
+1) Add a new folder in repo: vscode-extension/
+   - full extension code (TypeScript)
+   - package.json contributions (commands, settings, view)
+   - src/extension.ts, webview provider, api client, patch apply module, context gather module
+2) Update root README.md to include:
+   - Local setup
+   - VM/Runpod setup (public endpoint vs SSH tunnel)
+   - How to install/build the VSCode extension (F5 dev host + vsix optional)
+   - How to configure serverUrl
+3) Provide a manual test checklist.
+
+START NOW (order)
+- First, output a concrete file/folder plan for what you will add/change.
+- Then implement the VSCode extension MVP end-to-end:
+  - ping server
+  - propose -> show diff
+  - approve -> apply patch locally
+  - reject -> clear pending UI
+- Then update README/docs for Local vs Runpod/VM setup paths.
+
+NON-NEGOTIABLE RULES
+- Do not break bootstrap.py flow.
+- Do not remove existing server endpoints; extend as needed.
+- Keep changes minimal and consistent with current repo structure.
+- Keep the VSCode UX inside VSCode; do not require browser usage.

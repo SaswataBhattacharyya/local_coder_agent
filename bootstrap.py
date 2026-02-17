@@ -77,6 +77,13 @@ def set_config_quant(hint: str) -> None:
     for key in ["reasoner", "coder", "vlm"]:
         if "models" in data and key in data["models"]:
             data["models"][key]["filename_hint"] = hint
+    # Update model_registry local options
+    registry = data.get("model_registry", {})
+    for role in ["reasoner", "coder"]:
+        options = (registry.get(role) or {}).get("options") or []
+        for opt in options:
+            if opt.get("provider") == "local":
+                opt["filename_hint"] = hint
     cfg.write_text(yaml.safe_dump(data, sort_keys=False))
 
 def set_restore_remote(url: str) -> None:

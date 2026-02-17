@@ -1,0 +1,89 @@
+{
+  "name": "local-code-agent",
+  "displayName": "Local Code Agent",
+  "description": "Cursor-like coding agent UI that connects to a local/remote agent server.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.86.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onView:localCodeAgent.chatView",
+    "onCommand:localCodeAgent.ping",
+    "onCommand:localCodeAgent.propose",
+    "onCommand:localCodeAgent.revise",
+    "onCommand:localCodeAgent.approve",
+    "onCommand:localCodeAgent.reject",
+    "onCommand:localCodeAgent.resetContext",
+    "onCommand:localCodeAgent.mcpAllow",
+    "onCommand:localCodeAgent.mcpRevoke",
+    "onCommand:localCodeAgent.mcpStatus"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "localCodeAgent",
+          "title": "Local Code Agent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "localCodeAgent": [
+        {
+          "id": "localCodeAgent.chatView",
+          "name": "Agent"
+        }
+      ]
+    },
+    "commands": [
+      { "command": "localCodeAgent.ping", "title": "Local Code Agent: Ping Server" },
+      { "command": "localCodeAgent.propose", "title": "Local Code Agent: Propose" },
+      { "command": "localCodeAgent.revise", "title": "Local Code Agent: Revise Pending" },
+      { "command": "localCodeAgent.approve", "title": "Local Code Agent: Approve Pending" },
+      { "command": "localCodeAgent.reject", "title": "Local Code Agent: Reject Pending" },
+      { "command": "localCodeAgent.resetContext", "title": "Local Code Agent: Reset Context" },
+      { "command": "localCodeAgent.mcpAllow", "title": "Local Code Agent: MCP Allow" },
+      { "command": "localCodeAgent.mcpRevoke", "title": "Local Code Agent: MCP Revoke" },
+      { "command": "localCodeAgent.mcpStatus", "title": "Local Code Agent: MCP Status" }
+    ],
+    "configuration": {
+      "title": "Local Code Agent",
+      "properties": {
+        "localCodeAgent.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8010",
+          "description": "Agent server URL (local or remote)."
+        },
+        "localCodeAgent.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Optional API key sent as Authorization: Bearer <key>."
+        },
+        "localCodeAgent.useGitApply": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use git apply to apply patches when approving."
+        },
+        "localCodeAgent.sendContextBundle": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send minimal context bundle with propose/revise requests."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "typescript": "^5.4.5",
+    "vsce": "^2.26.0"
+  }
+}

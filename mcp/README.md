@@ -8,11 +8,14 @@ Configured by default:
 - `playwright` via `@modelcontextprotocol/server-playwright`
 
 Config file: `configs/mcp.yaml`
+Override (Cursor-style): create `mcp.json` in repo root. Example: `mcp.json.example`.
 
 ## Endpoints
 - `POST /mcp/list_tools` with `{ "server": "playwright", "confirm": "YES" }`
 - `POST /mcp/call` with `{ "server": "playwright", "tool": "<tool_name>", "arguments": { ... }, "confirm": "YES" }`
 - `POST /mcp/allow` with `{ "confirm": "YES" }` (one-time allow for auto MCP use)
+- `POST /mcp/revoke` with `{ "confirm": "YES" }`
+- `POST /mcp/reload` reloads config (useful after editing `mcp.json`)
 
 ## Installing Playwright MCP
 Requires Node + npm:

@@ -16,6 +16,28 @@ models:
     repo_id: ggml-org/Qwen2.5-VL-7B-Instruct-GGUF
     filename_hint: Q4_K_M
     context: 4096
+model_registry:
+  reasoner:
+    default: deepseek-r1-distill-qwen-7b
+    options:
+      - id: deepseek-r1-distill-qwen-7b
+        provider: local
+        role: reasoner
+        model_dir: reasoner
+        filename_hint: Q4_K_M
+        context: 8192
+  coder:
+    default: qwen2.5-coder-7b
+    options:
+      - id: qwen2.5-coder-7b
+        provider: local
+        role: coder
+        model_dir: coder
+        filename_hint: Q4_K_M
+        context: 8192
+  selected:
+    reasoner: best
+    coder: best
 runtime:
   host: 0.0.0.0
   port: 8010
@@ -24,3 +46,9 @@ restore:
   remote_url: ""
   remote_name: agent-restore
   push_on_approve: true
+context_ingest:
+  enabled: true
+  max_chars: 12000
+  chunk_size: 2000
+  chunk_overlap: 200
+  top_k: 6

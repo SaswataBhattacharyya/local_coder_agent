@@ -5,11 +5,16 @@ from pathlib import Path
 import os
 import subprocess
 import re
+import uuid
 
 from agent.config import load_config
 from agent.planner import QueryPlanner
 from agent.state import AgentSession, AgentState
 from agent.pipeline import propose_patch, revise_pending_patch
+from agent.llm_router import chat as llm_chat
+from agent.model_registry import list_models, set_selected
+from agent.context_ingest import ingest_and_store
+from rlm_wrap.store import RLMVarStore
 from rlm_wrap.context import reset_context, build_minimal_meta
 from mcp.registry import MCPRegistry
 from mcp.policy import load_policy, load_state, save_state, is_risky_tool
@@ -23,6 +28,7 @@ CONFIG_PATH = APP_ROOT / "configs" / "config.yaml"
 class InitRequest(BaseModel):
     repo_root: str
     restore_remote_url: str | None = None
+    allow_missing_repo: bool = False
 
 class RestoreRemoteRequest(BaseModel):
     restore_remote_url: str
@@ -32,6 +38,7 @@ class ProposeRequest(BaseModel):
     instruction: str
     mcp_confirm: str | None = None
     mcp_query: str | None = None
+    context: dict | None = None
 
 class QueryRequest(BaseModel):
     user_text: str
@@ -40,6 +47,7 @@ class ReviseRequest(BaseModel):
     instruction: str
     mcp_confirm: str | None = None
     mcp_query: str | None = None
+    context: dict | None = None
 
 class PatchRequest(BaseModel):
     unified_diff: str
@@ -78,7 +86,11 @@ STATE = {
 def init(req: InitRequest):
     repo = Path(req.repo_root).resolve()
     if not repo.exists():
-        raise HTTPException(400, f"repo_root not found: {repo}")
+        if req.allow_missing_repo:
+            repo = (APP_ROOT / ".agent_stateless" / str(uuid.uuid4())).resolve()
+            repo.mkdir(parents=True, exist_ok=True)
+        else:
+            raise HTTPException(400, f"repo_root not found: {repo}")
     ring = repo / ".agent" / "restore_ring.json"
     restore_url = req.restore_remote_url if req.restore_remote_url else CONFIG.restore.remote_url
     git = GitOps(
@@ -100,6 +112,7 @@ def init(req: InitRequest):
     STATE["session"] = AgentSession(state=AgentState.IDLE)
     mcp_state = load_state(repo)
     STATE["mcp_allowed"] = bool(mcp_state.get("mcp_allowed", False))
+    _reload_mcp_config(repo)
     minimal = build_minimal_meta(
         repo_root=repo,
         head=git.get_head(),
@@ -154,10 +167,16 @@ def query(req: QueryRequest):
         raise HTTPException(400, "init first")
     planner = QueryPlanner(STATE["session"])
     result = planner.analyze(req.user_text)
+    plan = result.plan
+    if result.state == "READY":
+        try:
+            plan = _generate_plan_llm(req.user_text)
+        except Exception:
+            plan = result.plan
     return {
         "state": result.state,
         "questions": result.questions,
-        "plan": result.plan,
+        "plan": plan,
         "use_mcp": result.use_mcp,
         "mcp_server": result.mcp_server,
     }
@@ -166,10 +185,13 @@ def query(req: QueryRequest):
 def propose(req: ProposeRequest):
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
+    external_context = _context_bundle_to_text(req.context)
     mcp_query = req.mcp_query
     if not mcp_query and _should_use_mcp(req.instruction):
         mcp_query = req.instruction
-    external_context, mcp_meta = _maybe_use_mcp(req.mcp_confirm, mcp_query)
+    mcp_context, mcp_meta = _maybe_use_mcp(req.mcp_confirm, mcp_query)
+    external_context.extend(mcp_context)
+    external_context, ingest_meta = _maybe_ingest_context(req.instruction, external_context)
     try:
         proposal = propose_patch(req.instruction, STATE["indexer"], CONFIG, external_context=external_context)
     except Exception as exc:
@@ -185,6 +207,7 @@ def propose(req: ProposeRequest):
         "touched_files": touched,
         "risk_notes": proposal.risk_notes,
         "mcp": mcp_meta,
+        "ingest": ingest_meta,
     }
 
 @app.get("/pending")
@@ -201,10 +224,13 @@ def revise_pending(req: ReviseRequest):
         raise HTTPException(400, "init first")
     if not STATE["pending_diff"]:
         raise HTTPException(400, "no pending diff")
+    external_context = _context_bundle_to_text(req.context)
     mcp_query = req.mcp_query
     if not mcp_query and _should_use_mcp(req.instruction):
         mcp_query = req.instruction
-    external_context, mcp_meta = _maybe_use_mcp(req.mcp_confirm, mcp_query)
+    mcp_context, mcp_meta = _maybe_use_mcp(req.mcp_confirm, mcp_query)
+    external_context.extend(mcp_context)
+    external_context, ingest_meta = _maybe_ingest_context(req.instruction, external_context)
     try:
         proposal = revise_pending_patch(req.instruction, STATE["pending_diff"], STATE["indexer"], CONFIG, external_context=external_context)
     except Exception as exc:
@@ -220,6 +246,7 @@ def revise_pending(req: ReviseRequest):
         "touched_files": touched,
         "risk_notes": proposal.risk_notes,
         "mcp": mcp_meta,
+        "ingest": ingest_meta,
     }
 
 @app.post("/apply_to_staging")
@@ -240,6 +267,71 @@ def _touched_files(unified_diff: str) -> list[str]:
         if line.startswith("+++ b/"):
             files.append(line[6:].strip())
     return files
+
+
+def _context_bundle_to_text(context: dict | None) -> list[str]:
+    if not context:
+        return []
+    blocks: list[str] = []
+    files = context.get("files") or []
+    for f in files:
+        path = f.get("path", "unknown")
+        content = f.get("content", "")
+        if content:
+            blocks.append(f"[File] {path}\n{content}")
+    snippets = context.get("snippets") or []
+    for s in snippets:
+        path = s.get("path", "unknown")
+        start = s.get("startLine", "?")
+        end = s.get("endLine", "?")
+        text = s.get("text", "")
+        if text:
+            blocks.append(f"[Snippet] {path}:{start}-{end}\n{text}")
+    return blocks
+
+
+def _maybe_ingest_context(user_text: str, blocks: list[str]) -> tuple[list[str], dict]:
+    if not blocks:
+        return blocks, {"used": False}
+    cfg = CONFIG.context_ingest
+    if not cfg.enabled:
+        return blocks, {"used": False}
+    joined = "\n\n".join(blocks)
+    if len(joined) <= cfg.max_chars:
+        return blocks, {"used": False, "reason": "below_threshold"}
+    store = RLMVarStore(repo_root=Path(STATE["repo_root"]))
+    result = ingest_and_store(
+        joined,
+        query=user_text,
+        store=store,
+        chunk_size=cfg.chunk_size,
+        chunk_overlap=cfg.chunk_overlap,
+        top_k=cfg.top_k,
+    )
+    out = [f"[Ingest Summary]\n{result.summary}"]
+    for idx, ch in enumerate(result.top_chunks, start=1):
+        out.append(f"[Ingest Chunk {idx}]\n{ch}")
+    meta = {
+        "used": True,
+        "chunks": len(result.chunks),
+        "top_k": len(result.top_chunks),
+        "summary": result.summary,
+    }
+    return out, meta
+
+
+def _generate_plan_llm(user_text: str) -> list[str]:
+    prompt = (
+        "Create a short, concrete plan (3-5 steps) for the following request. "
+        "Return as a bullet list, each line starting with '- '.\n\n"
+        f"Request: {user_text}"
+    )
+    raw = llm_chat("reasoner", [
+        {"role": "system", "content": "You are a software planning assistant."},
+        {"role": "user", "content": prompt},
+    ], CONFIG, Path(STATE["repo_root"]), CONFIG_PATH)
+    lines = [l.strip("- ") for l in raw.splitlines() if l.strip().startswith("-")]
+    return lines[:5] if lines else [\"Review request\", \"Identify relevant files\", \"Propose minimal changes\"]
 
 
 def _maybe_use_mcp(confirm: str | None, query: str | None) -> tuple[list[str], dict]:
@@ -358,6 +450,17 @@ def _domain_allowed(domain: str, allowlist: list[str]) -> bool:
             return True
     return False
 
+
+def _reload_mcp_config(repo_root: Path) -> None:
+    global MCP_POLICY
+    override = repo_root / "mcp.json"
+    if override.exists():
+        MCP_REGISTRY.set_config_path(override)
+    else:
+        MCP_REGISTRY.set_config_path(MCP_CONFIG_PATH)
+    MCP_REGISTRY.reload()
+    MCP_POLICY = load_policy(MCP_REGISTRY.config_path)
+
 @app.post("/approve")
 def approve(req: ApproveRequest):
     if STATE["repo_root"] is None:
@@ -452,6 +555,25 @@ def reset_context_endpoint():
     STATE["session"] = AgentSession(state=AgentState.IDLE)
     return {"status": "ok"}
 
+@app.get("/models")
+def get_models():
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
+    repo_root = Path(STATE["repo_root"])
+    return {
+        "reasoner": list_models("reasoner", CONFIG, repo_root, CONFIG_PATH),
+        "coder": list_models("coder", CONFIG, repo_root, CONFIG_PATH),
+    }
+
+@app.post("/models/select")
+def select_model(req: ModelSelectRequest):
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
+    if req.role not in ("reasoner", "coder"):
+        raise HTTPException(400, "role must be reasoner or coder")
+    set_selected(req.role, req.model_id, Path(STATE["repo_root"]), CONFIG_PATH)
+    return {"status": "ok"}
+
 class RunCommandRequest(BaseModel):
     command: str
     require_yes: bool = True
@@ -469,6 +591,13 @@ class MCPCallRequest(BaseModel):
 
 class MCPAllowRequest(BaseModel):
     confirm: str | None = None
+
+class MCPRevokeRequest(BaseModel):
+    confirm: str | None = None
+
+class ModelSelectRequest(BaseModel):
+    role: str
+    model_id: str
 
 class MCPStatusResponse(BaseModel):
     mcp_allowed: bool
@@ -509,17 +638,29 @@ def mcp_allow(req: MCPAllowRequest):
         save_state(Path(STATE["repo_root"]), {"mcp_allowed": True})
     return {"status": "ok", "mcp_allowed": True}
 
+@app.post("/mcp/revoke")
+def mcp_revoke(req: MCPRevokeRequest):
+    if req.confirm is None or req.confirm.strip().upper() != "YES":
+        return {"status": "needs_confirmation", "message": "MCP revoke requires explicit YES confirmation."}
+    STATE["mcp_allowed"] = False
+    if STATE["repo_root"] is not None:
+        save_state(Path(STATE["repo_root"]), {"mcp_allowed": False})
+    return {"status": "ok", "mcp_allowed": False}
+
 @app.get("/mcp/status")
 def mcp_status():
     return {
         "mcp_allowed": bool(STATE.get("mcp_allowed", False)),
         "allowed_domains": MCP_POLICY.allowed_domains,
         "repo_root": STATE.get("repo_root"),
-        "servers": list(MCP_REGISTRY.load().keys()) if MCP_CONFIG_PATH.exists() else [],
+        "servers": list(MCP_REGISTRY.load().keys()) if MCP_REGISTRY.config_path.exists() else [],
+        "config_path": str(MCP_REGISTRY.config_path),
     }
 
 @app.post("/mcp/list_tools")
 def mcp_list_tools(req: MCPListRequest):
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
     if req.confirm is None or req.confirm.strip().upper() != "YES":
         return {"status": "needs_confirmation", "message": "Starting MCP server requires YES confirmation."}
     try:
@@ -534,6 +675,8 @@ def mcp_list_tools(req: MCPListRequest):
 
 @app.post("/mcp/call")
 def mcp_call(req: MCPCallRequest):
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
     if req.confirm is None or req.confirm.strip().upper() != "YES":
         # If tool is risky, require explicit YES
         risky, reason = is_risky_tool(req.tool, req.arguments, Path(STATE["repo_root"]), MCP_POLICY)
@@ -550,3 +693,10 @@ def mcp_call(req: MCPCallRequest):
         return {"status": "ok", "response": resp}
     except Exception as exc:
         raise HTTPException(400, f"mcp call failed: {exc}")
+
+@app.post("/mcp/reload")
+def mcp_reload():
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
+    _reload_mcp_config(Path(STATE["repo_root"]))
+    return {"status": "ok", "config_path": str(MCP_REGISTRY.config_path)}

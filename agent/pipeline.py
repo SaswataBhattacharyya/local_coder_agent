@@ -4,8 +4,7 @@ from pathlib import Path
 import re
 from typing import List, Dict, Tuple
 
-from rlm_wrap.runtime import RLMChatRuntime
-from rlm_wrap.store import RLMVarStore
+from agent.llm_router import chat as llm_chat
 from indexer.indexer import SymbolIndexer
 from agent.config import AppConfig
 
@@ -34,18 +33,10 @@ def propose_patch(user_text: str, indexer: SymbolIndexer, config: AppConfig, ext
         "Return a minimal unified diff",
     ]
     prompt = _build_prompt(user_text, plan, context_blocks, external_context or [])
-    model_dir = Path(config.paths.models_dir) / "coder"
-    var_store = RLMVarStore(repo_root=indexer.repo_root)
-    runtime = RLMChatRuntime(
-        model_dir=model_dir,
-        filename_hint=config.coder.filename_hint,
-        n_ctx=config.coder.context,
-        var_store=var_store,
-    )
-    raw = runtime.chat([
+    raw = llm_chat("coder", [
         {"role": "system", "content": "You are a coding assistant. Output a unified diff only, plus a one-line SUMMARY and RISK line."},
         {"role": "user", "content": prompt},
-    ], vars={"context_blocks": context_blocks, "plan": plan})
+    ], config, indexer.repo_root, config_path=Path(__file__).resolve().parents[1] / "configs" / "config.yaml")
     summary = _extract_line(raw, "SUMMARY:")
     risk = _extract_line(raw, "RISK:")
     diff = _extract_diff(raw)
@@ -57,18 +48,10 @@ def propose_patch(user_text: str, indexer: SymbolIndexer, config: AppConfig, ext
 def revise_pending_patch(user_text: str, pending_diff: str, indexer: SymbolIndexer, config: AppConfig, external_context: List[str] | None = None) -> Proposal:
     context_blocks = _build_context(user_text, indexer)
     prompt = _build_revise_prompt(user_text, pending_diff, context_blocks, external_context or [])
-    model_dir = Path(config.paths.models_dir) / "coder"
-    var_store = RLMVarStore(repo_root=indexer.repo_root)
-    runtime = RLMChatRuntime(
-        model_dir=model_dir,
-        filename_hint=config.coder.filename_hint,
-        n_ctx=config.coder.context,
-        var_store=var_store,
-    )
-    raw = runtime.chat([
+    raw = llm_chat("coder", [
         {"role": "system", "content": "You are a coding assistant. Update the diff minimally. Output a unified diff only, plus a one-line SUMMARY and RISK line."},
         {"role": "user", "content": prompt},
-    ], vars={"context_blocks": context_blocks})
+    ], config, indexer.repo_root, config_path=Path(__file__).resolve().parents[1] / "configs" / "config.yaml")
     summary = _extract_line(raw, "SUMMARY:")
     risk = _extract_line(raw, "RISK:")
     diff = _extract_diff(raw)
