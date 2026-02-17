@@ -1,0 +1,9 @@
+servers:
+  playwright:
+    command:
+      - npx
+      - -y
+      - "@modelcontextprotocol/server-playwright"
+    env: {}
+policy:
+  allowed_domains: []

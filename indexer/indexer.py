@@ -174,3 +174,42 @@ class SymbolIndexer:
             if len(results) >= max_results:
                 break
         return results
+
+    def get_snippet(self, file_rel: str, line: int, window: int = 6, max_lines: int = 80) -> str:
+        path = self.repo_root / file_rel
+        if not path.exists():
+            return ""
+        lines = path.read_text(errors="ignore").splitlines()
+        start = max(1, line - window)
+        end = min(len(lines), line + window)
+        if end - start + 1 > max_lines:
+            end = min(len(lines), start + max_lines - 1)
+        out = []
+        for idx in range(start, end + 1):
+            out.append(f"{idx:4d}: {lines[idx-1]}")
+        return "\n".join(out)
+
+    def get_file_head(self, file_rel: str, max_lines: int = 200) -> str:
+        path = self.repo_root / file_rel
+        if not path.exists():
+            return ""
+        lines = path.read_text(errors="ignore").splitlines()
+        out = []
+        for idx, line in enumerate(lines[:max_lines], start=1):
+            out.append(f"{idx:4d}: {line}")
+        return "\n".join(out)
+
+    def search_symbols(self, name_substr: str, limit: int = 50) -> List[Dict[str, object]]:
+        self.init_db()
+        con = sqlite3.connect(self.db_path)
+        cur = con.cursor()
+        like = f"%{name_substr}%"
+        rows = cur.execute(
+            "SELECT file_path, kind, name, start_line, end_line FROM symbols WHERE name LIKE ? LIMIT ?",
+            (like, limit),
+        ).fetchall()
+        con.close()
+        return [
+            {"file": r[0], "kind": r[1], "name": r[2], "start_line": r[3], "end_line": r[4]}
+            for r in rows
+        ]

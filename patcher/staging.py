@@ -35,3 +35,25 @@ class StagingArea:
         )
         if p.returncode != 0:
             raise RuntimeError(f"git apply failed: {p.stderr.strip()}")
+
+    def check_unified_diff(self, diff_text: str) -> None:
+        p = subprocess.run(
+            ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+            input=diff_text,
+            text=True,
+            cwd=self.repo_root,
+            capture_output=True,
+        )
+        if p.returncode != 0:
+            raise RuntimeError(f"git apply --check failed: {p.stderr.strip()}")
+
+    def apply_unified_diff_to_repo(self, diff_text: str) -> None:
+        p = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", "-"],
+            input=diff_text,
+            text=True,
+            cwd=self.repo_root,
+            capture_output=True,
+        )
+        if p.returncode != 0:
+            raise RuntimeError(f"git apply failed: {p.stderr.strip()}")

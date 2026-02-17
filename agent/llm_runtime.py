@@ -2,6 +2,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+
+def find_gguf_model(model_dir: Path, filename_hint: str) -> Path:
+    if not model_dir.exists():
+        raise FileNotFoundError(f"Model directory not found: {model_dir}")
+    ggufs = sorted(model_dir.glob("*.gguf"))
+    if not ggufs:
+        raise FileNotFoundError(f"No GGUF files in: {model_dir}")
+    hint = filename_hint.lower()
+    for f in ggufs:
+        if hint in f.name.lower():
+            return f
+    for f in ggufs:
+        if "q4_k_m" in f.name.lower():
+            return f
+    return ggufs[0]
 from llama_cpp import Llama
 
 @dataclass

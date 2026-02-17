@@ -23,12 +23,19 @@ class RuntimeCfg:
     allow_shell: bool = False
 
 @dataclass
+class RestoreCfg:
+    remote_url: str = ""
+    remote_name: str = "agent-restore"
+    push_on_approve: bool = True
+
+@dataclass
 class AppConfig:
     paths: PathsCfg
     reasoner: ModelCfg
     coder: ModelCfg
     vlm: ModelCfg
     runtime: RuntimeCfg
+    restore: RestoreCfg
 
 def load_config(path: Path) -> AppConfig:
     data = yaml.safe_load(path.read_text())
@@ -42,4 +49,5 @@ def load_config(path: Path) -> AppConfig:
     coder = ModelCfg(**m["coder"])
     vlm = ModelCfg(**m["vlm"])
     runtime = RuntimeCfg(**data.get("runtime", {}))
-    return AppConfig(paths=paths, reasoner=reasoner, coder=coder, vlm=vlm, runtime=runtime)
+    restore = RestoreCfg(**data.get("restore", {}))
+    return AppConfig(paths=paths, reasoner=reasoner, coder=coder, vlm=vlm, runtime=runtime, restore=restore)

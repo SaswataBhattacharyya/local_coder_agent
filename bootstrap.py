@@ -14,6 +14,7 @@ See your example for the style of stepwise setup.
 from __future__ import annotations
 import os, sys, subprocess, shutil
 from pathlib import Path
+import yaml
 
 ROOT = Path(__file__).resolve().parent
 VENV = ROOT / "venv"
@@ -72,11 +73,18 @@ def choose_quant_hint(vram_gb: int) -> str:
 
 def set_config_quant(hint: str) -> None:
     cfg = ROOT / "configs" / "config.yaml"
-    txt = cfg.read_text()
-    # naive replace for MVP
+    data = yaml.safe_load(cfg.read_text())
     for key in ["reasoner", "coder", "vlm"]:
-        txt = txt.replace("filename_hint: Q4_K_M", f"filename_hint: {hint}", 1) if "filename_hint: Q4_K_M" in txt else txt
-    cfg.write_text(txt)
+        if "models" in data and key in data["models"]:
+            data["models"][key]["filename_hint"] = hint
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
+
+def set_restore_remote(url: str) -> None:
+    cfg = ROOT / "configs" / "config.yaml"
+    data = yaml.safe_load(cfg.read_text())
+    data.setdefault("restore", {})
+    data["restore"]["remote_url"] = url.strip()
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
 
 def install_rlm() -> None:
     py = str(venv_python())
@@ -127,6 +135,9 @@ def main():
     hint = choose_quant_hint(vram)
     print(f"[INFO] Using quant hint: {hint}")
     set_config_quant(hint)
+    restore_url = input("Optional: enter git repo URL for restore backup (leave blank to disable revert backup): ").strip()
+    if restore_url:
+        set_restore_remote(restore_url)
     download_models(hint)
     print("[READY] Starting server at http://localhost:8010/docs")
     start_server()
