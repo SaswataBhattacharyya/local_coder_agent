@@ -401,6 +401,7 @@ class AgentViewProvider {
   </style>
 </head>
 <body>
+  <div style="font-size:12px;color:#8b949e;margin-bottom:6px;">Local Code Agent UI Loaded</div>
   <div class="status">Status: <span id="status">Not connected</span></div>
   <div class="status">Server: <span id="serverUrl"></span></div>
 
@@ -565,6 +566,11 @@ function activate(context) {
     for (const [cmd, fn] of commands) {
         context.subscriptions.push(vscode.commands.registerCommand(cmd, fn));
     }
+    // Best-effort: open the view container and ping server on activation
+    setTimeout(() => {
+        vscode.commands.executeCommand("workbench.view.extension.localCodeAgent");
+        vscode.commands.executeCommand("localCodeAgent.ping");
+    }, 500);
 }
 function deactivate() { }
 function getNonce() {

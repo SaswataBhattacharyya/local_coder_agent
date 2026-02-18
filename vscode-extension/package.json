@@ -35,6 +35,7 @@
     "views": {
       "localCodeAgent": [
         {
+          "type": "webview",
           "id": "localCodeAgent.chatView",
           "name": "Agent"
         }
@@ -80,12 +81,11 @@
   "scripts": {
     "build": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "npx @vscode/vsce package"
   },
   "devDependencies": {
     "@types/vscode": "^1.86.0",
     "@types/node": "^20.11.30",
-    "typescript": "^5.4.5",
-    "@vscode/vsce": "^2.26.0"
+    "typescript": "^5.4.5"
   }
 }

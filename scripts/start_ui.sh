@@ -37,25 +37,7 @@ fi
 
 npm run build
 
-# Package and install the extension
-if ! command -v vsce >/dev/null 2>&1; then
-  npx @vscode/vsce package
-else
-  vsce package
-fi
-
-VSIX=$(ls -t *.vsix | head -n 1)
-if [ -z "$VSIX" ]; then
-  echo "ERROR: VSIX not found after packaging."
-  exit 1
-fi
-
-code --install-extension "$EXT_DIR/$VSIX" --force
-
-# Open VSCode in repo root
-code "$ROOT"
-
-# Try to focus the view (best-effort)
-code --command "localCodeAgent.ping" || true
+# Launch VSCode with the extension in dev mode
+code --extensionDevelopmentPath "$EXT_DIR" --new-window "$ROOT"
 
 echo "UI started. Server URL set to: $SERVER_URL"

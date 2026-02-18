@@ -54,6 +54,8 @@ Optional: package as VSIX:
 npm run package
 ```
 
+Note: VSIX packaging via `npm run package` requires Node 20+ because `@vscode/vsce` pulls `undici`.
+
 Helper:
 ```bash
 python3 scripts/print_setup_steps.py
@@ -71,9 +73,9 @@ LOCAL_CODE_AGENT_SERVER_URL=https://<runpod-url> ./scripts/start_ui.sh
 What `start_ui.sh` does:
 1. Ensures VSCode CLI is available (`code`).
 2. Writes `.vscode/settings.json` with `localCodeAgent.serverUrl`.
-3. Installs/builds extension dependencies and packages a VSIX.
-4. Installs the VSIX into VSCode.
-5. Opens the repo in VSCode and pings the server.
+3. Installs/builds extension dependencies.
+4. Opens VSCode with the extension in development mode.
+5. Pings the server.
 
 In the extension UI you can:
 - Select Reasoner/Coder models (dropdowns)
@@ -88,6 +90,7 @@ In the extension UI you can:
 
 - Shell commands are **gated**: the server will require explicit confirmation tokens.
 - Edits are **staged** as pending patches until approved (git commit on approval).
+- Stateless mode (when server can't access your workspace) will auto-configure a local git identity.
 
 ## MCP (Optional)
 
