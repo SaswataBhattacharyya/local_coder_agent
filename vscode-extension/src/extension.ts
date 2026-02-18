@@ -331,7 +331,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async disableRestoreRemote(): Promise<void> {
-    const res = await this.api.post<any>("/restore_remote", { restore_remote_url: \"\" });
+    const res = await this.api.post<any>("/restore_remote", { restore_remote_url: "" });
     if (!res.ok) {
       vscode.window.showErrorMessage(`Disable restore remote failed: ${res.error}`);
       return;

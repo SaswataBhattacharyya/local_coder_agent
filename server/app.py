@@ -64,6 +64,10 @@ class ApproveRequest(BaseModel):
     unified_diff: str
     message: str | None = None
 
+class ModelSelectRequest(BaseModel):
+    role: str
+    model_id: str
+
 class SessionStartRequest(BaseModel):
     repo_root: str
 
@@ -860,10 +864,6 @@ class MCPAllowRequest(BaseModel):
 
 class MCPRevokeRequest(BaseModel):
     confirm: str | None = None
-
-class ModelSelectRequest(BaseModel):
-    role: str
-    model_id: str
 
 class MCPStatusResponse(BaseModel):
     mcp_allowed: bool
