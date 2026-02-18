@@ -59,7 +59,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.status = "Connected";
-    await this.loadModels();
+    await this.loadModels(false);
     this.refresh();
   }
 
@@ -115,7 +115,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
         await this.mcpReload();
         break;
       case "modelsRefresh":
-        await this.loadModels();
+        await this.loadModels(true);
         break;
       case "restoreSet":
         await this.setRestoreRemote();
@@ -272,8 +272,10 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     await this.mcpStatus();
   }
 
-  private async loadModels(): Promise<void> {
-    await this.ensureInit();
+  private async loadModels(callInit: boolean = true): Promise<void> {
+    if (callInit) {
+      await this.ensureInit();
+    }
     const res = await this.api.get<any>("/models");
     if (!res.ok) {
       this.modelInfo = null;
