@@ -368,7 +368,7 @@ def _generate_plan_llm(user_text: str) -> list[str]:
         {"role": "user", "content": prompt},
     ], CONFIG, Path(STATE["repo_root"]), CONFIG_PATH)
     lines = [l.strip("- ") for l in raw.splitlines() if l.strip().startswith("-")]
-    return lines[:5] if lines else [\"Review request\", \"Identify relevant files\", \"Propose minimal changes\"]
+    return lines[:5] if lines else ["Review request", "Identify relevant files", "Propose minimal changes"]
 
 
 def _maybe_use_mcp(confirm: str | None, query: str | None) -> tuple[list[str], dict]:
