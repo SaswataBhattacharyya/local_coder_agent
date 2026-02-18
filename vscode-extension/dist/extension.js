@@ -346,44 +346,37 @@ class AgentViewProvider {
         this.refresh();
     }
     async disableRestoreRemote() {
-        const res = await this.api.post("/restore_remote", { restore_remote_url: , "\" });: ,
-            if(, res) { }, : .ok }), { vscode, window, showErrorMessage };
-        (`Disable restore remote failed: ${res.error}`);
-        return;
+        const res = await this.api.post("/restore_remote", { restore_remote_url: "" });
+        if (!res.ok) {
+            vscode.window.showErrorMessage(`Disable restore remote failed: ${res.error}`);
+            return;
+        }
+        this.restoreStatusText = JSON.stringify(res.data, null, 2);
+        this.refresh();
     }
-}
-AgentViewProvider.viewType = "localCodeAgent.chatView";
-this.restoreStatusText = JSON.stringify(res.data, null, 2);
-this.refresh();
-async;
-openDiffPreview(diffText, string);
-Promise < void  > {
-    const: doc = await vscode.workspace.openTextDocument({ content: diffText, language: "diff" }),
-    await, vscode, : .window.showTextDocument(doc, { preview: true })
-};
-refresh();
-void {
-    : .view
-};
-{
-    this.view.webview.postMessage({
-        type: "state",
-        messages: this.messages,
-        pending: this.pending,
-        status: this.status,
-        serverUrl: this.serverUrl,
-        modelInfo: this.modelInfo,
-        modelStatusText: this.modelStatusText,
-        mcpStatusText: this.mcpStatusText,
-        restoreStatusText: this.restoreStatusText,
-        ingestStatusText: this.ingestStatusText,
-    });
-}
-getHtml(webview, vscode.Webview);
-string;
-{
-    const nonce = getNonce();
-    return `<!DOCTYPE html>
+    async openDiffPreview(diffText) {
+        const doc = await vscode.workspace.openTextDocument({ content: diffText, language: "diff" });
+        await vscode.window.showTextDocument(doc, { preview: true });
+    }
+    refresh() {
+        if (this.view) {
+            this.view.webview.postMessage({
+                type: "state",
+                messages: this.messages,
+                pending: this.pending,
+                status: this.status,
+                serverUrl: this.serverUrl,
+                modelInfo: this.modelInfo,
+                modelStatusText: this.modelStatusText,
+                mcpStatusText: this.mcpStatusText,
+                restoreStatusText: this.restoreStatusText,
+                ingestStatusText: this.ingestStatusText,
+            });
+        }
+    }
+    getHtml(webview) {
+        const nonce = getNonce();
+        return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -534,12 +527,12 @@ string;
         (msg.messages || []).forEach(m => {
           const div = document.createElement("div");
           div.className = `;
-    msg;
-    $;
-    {
-        m.role;
-    }
-    `;
+        msg;
+        $;
+        {
+            m.role;
+        }
+        `;
           div.textContent = m.text;
           chatEl.appendChild(div);
         });
@@ -557,7 +550,9 @@ string;
   </script>
 </body>
 </html>`;
+    }
 }
+AgentViewProvider.viewType = "localCodeAgent.chatView";
 function activate(context) {
     const provider = new AgentViewProvider(context);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(AgentViewProvider.viewType, provider));
