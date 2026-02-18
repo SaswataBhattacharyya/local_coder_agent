@@ -24,25 +24,25 @@ export async function gatherContext(): Promise<ContextBundle> {
   });
 
   if (query) {
-    const tasks: Promise<void>[] = [];
-    await vscode.workspace.findTextInFiles({ pattern: query }, { maxResults: 20 }, (result: vscode.TextSearchResult) => {
+    const tasks: Array<Thenable<void>> = [];
+    const ws: any = vscode.workspace as any;
+    await ws.findTextInFiles({ pattern: query }, { maxResults: 20 }, (result: any) => {
       const docUri = result.uri;
       const start = Math.max(0, result.ranges[0].start.line - 4);
       const end = result.ranges[0].end.line + 4;
       const range = new vscode.Range(start, 0, end, 0);
-      tasks.push(
-        vscode.workspace.openTextDocument(docUri).then((doc: vscode.TextDocument) => {
-          const text = doc.getText(range);
-          bundle.snippets.push({
-            path: docUri.fsPath,
-            startLine: start + 1,
-            endLine: end + 1,
-            text,
-          });
-        })
-      );
+      const t = vscode.workspace.openTextDocument(docUri).then((doc: vscode.TextDocument) => {
+        const text = doc.getText(range);
+        bundle.snippets.push({
+          path: docUri.fsPath,
+          startLine: start + 1,
+          endLine: end + 1,
+          text,
+        });
+      });
+      tasks.push(t);
     });
-    await Promise.all(tasks);
+    await Promise.all(tasks.map((t) => Promise.resolve(t)));
   }
 
   return bundle;

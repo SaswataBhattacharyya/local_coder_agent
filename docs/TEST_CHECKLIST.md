@@ -33,6 +33,7 @@
 - MCP Allow / Revoke / Status work and show output
 - Model dropdowns update selections
 - Restore Remote buttons work
+- `scripts/start_ui.sh` opens VSCode and sets serverUrl
 
 ## VM/Runpod
 - Public endpoint: serverUrl set to https://<public-url>

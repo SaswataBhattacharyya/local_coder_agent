@@ -17,6 +17,11 @@ If you change code or install new deps, restart the server. For dev:
 uvicorn server.app:app --host 0.0.0.0 --port 8010 --reload
 ```
 
+Optional one-shot local start (server + UI):
+```bash
+./scripts/start_local.sh
+```
+
 2. In VSCode, set:
 
 - `localCodeAgent.serverUrl` = `http://127.0.0.1:8010`
@@ -51,6 +56,15 @@ ssh -L 8010:127.0.0.1:8010 <user>@<vm-host>
 
 Then set:
 - `localCodeAgent.serverUrl` = `http://127.0.0.1:8010`
+
+After SSH is connected, start the VSCode UI locally:
+```bash
+./scripts/start_ui.sh
+```
+Or set an explicit server URL:
+```bash
+LOCAL_CODE_AGENT_SERVER_URL=https://<runpod-url> ./scripts/start_ui.sh
+```
 
 ## VSCode Extension Install (Dev)
 

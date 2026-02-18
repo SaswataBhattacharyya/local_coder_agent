@@ -21,6 +21,11 @@ Note: If you change code or install new Python deps, restart the server. For dev
 uvicorn server.app:app --host 0.0.0.0 --port 8010 --reload
 ```
 
+One-shot local (server + VSCode UI):
+```bash
+./scripts/start_local.sh
+```
+
 ## Restore Remote (Optional)
 - You can set or disable the restore remote after init:
   - `POST /restore_remote` with `{ "restore_remote_url": "https://..." }`
@@ -53,6 +58,22 @@ Helper:
 ```bash
 python3 scripts/print_setup_steps.py
 ```
+
+UI launch (local):
+```bash
+./scripts/start_ui.sh
+```
+Override server URL:
+```bash
+LOCAL_CODE_AGENT_SERVER_URL=https://<runpod-url> ./scripts/start_ui.sh
+```
+
+What `start_ui.sh` does:
+1. Ensures VSCode CLI is available (`code`).
+2. Writes `.vscode/settings.json` with `localCodeAgent.serverUrl`.
+3. Installs/builds extension dependencies and packages a VSIX.
+4. Installs the VSIX into VSCode.
+5. Opens the repo in VSCode and pings the server.
 
 In the extension UI you can:
 - Select Reasoner/Coder models (dropdowns)
