@@ -136,8 +136,12 @@ def init(req: InitRequest):
     repo = Path(req.repo_root).resolve()
     if not repo.exists():
         if req.allow_missing_repo:
-            repo = (APP_ROOT / ".agent_stateless" / str(uuid.uuid4())).resolve()
-            repo.mkdir(parents=True, exist_ok=True)
+            # Reuse a stable stateless repo to avoid repeated git init/commit on each /init
+            if STATE.get("repo_root") and str(STATE.get("repo_root")).endswith(".agent_stateless/default"):
+                repo = Path(STATE["repo_root"]).resolve()
+            else:
+                repo = (APP_ROOT / ".agent_stateless" / "default").resolve()
+                repo.mkdir(parents=True, exist_ok=True)
         else:
             raise HTTPException(400, f"repo_root not found: {repo}")
     ring = repo / ".agent" / "restore_ring.json"

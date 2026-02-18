@@ -78,7 +78,10 @@ class GitOps:
                 pass
             return
         try:
-            current = subprocess.check_output(["git", "remote", "get-url", name], cwd=self.repo_root, text=True).strip()
+            p = subprocess.run(["git", "remote", "get-url", name], cwd=self.repo_root, text=True, capture_output=True)
+            if p.returncode != 0:
+                raise subprocess.CalledProcessError(p.returncode, p.args, p.stdout, p.stderr)
+            current = (p.stdout or "").strip()
             if current != self.restore_remote_url:
                 subprocess.run(["git", "remote", "set-url", name, self.restore_remote_url], cwd=self.repo_root, check=True)
         except subprocess.CalledProcessError:
