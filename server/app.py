@@ -64,6 +64,39 @@ class ApproveRequest(BaseModel):
     unified_diff: str
     message: str | None = None
 
+class SessionStartRequest(BaseModel):
+    repo_root: str
+
+class BranchCreateRequest(BaseModel):
+    name: str
+    from_branch: str | None = None
+
+class BranchSwitchRequest(BaseModel):
+    name: str
+
+class SnapshotRequest(BaseModel):
+    message: str | None = None
+
+class SnapshotRestoreRequest(BaseModel):
+    snapshot_id: str
+
+class RepoMapRebuildRequest(BaseModel):
+    full: bool = False
+
+class TaskSubmitRequest(BaseModel):
+    type: str
+    payload: dict
+
+class TaskStatusRequest(BaseModel):
+    task_id: str
+
+class TaskCancelRequest(BaseModel):
+    task_id: str
+
+class TaskLogsRequest(BaseModel):
+    task_id: str
+    after: float | None = None
+
 app = FastAPI(title="Local Code Agent (MVP)")
 CONFIG = load_config(CONFIG_PATH)
 if not CONFIG.paths.models_dir.is_absolute():
@@ -831,39 +864,6 @@ class MCPRevokeRequest(BaseModel):
 class ModelSelectRequest(BaseModel):
     role: str
     model_id: str
-
-class SessionStartRequest(BaseModel):
-    repo_root: str
-
-class BranchCreateRequest(BaseModel):
-    name: str
-    from_branch: str | None = None
-
-class BranchSwitchRequest(BaseModel):
-    name: str
-
-class SnapshotRequest(BaseModel):
-    message: str | None = None
-
-class SnapshotRestoreRequest(BaseModel):
-    snapshot_id: str
-
-class RepoMapRebuildRequest(BaseModel):
-    full: bool = False
-
-class TaskSubmitRequest(BaseModel):
-    type: str
-    payload: dict
-
-class TaskStatusRequest(BaseModel):
-    task_id: str
-
-class TaskCancelRequest(BaseModel):
-    task_id: str
-
-class TaskLogsRequest(BaseModel):
-    task_id: str
-    after: float | None = None
 
 class MCPStatusResponse(BaseModel):
     mcp_allowed: bool

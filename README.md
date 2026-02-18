@@ -16,6 +16,11 @@ The bootstrap script will:
 - download GGUF models (reasoner, coder, optional VLM)
 - start the local FastAPI server
 
+Note: If you change code or install new Python deps, restart the server. For dev, you can run:
+```bash
+uvicorn server.app:app --host 0.0.0.0 --port 8010 --reload
+```
+
 ## Restore Remote (Optional)
 - You can set or disable the restore remote after init:
   - `POST /restore_remote` with `{ "restore_remote_url": "https://..." }`

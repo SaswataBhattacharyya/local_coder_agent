@@ -12,6 +12,11 @@ Start here:
 python3 bootstrap.py
 ```
 
+If you change code or install new deps, restart the server. For dev:
+```bash
+uvicorn server.app:app --host 0.0.0.0 --port 8010 --reload
+```
+
 2. In VSCode, set:
 
 - `localCodeAgent.serverUrl` = `http://127.0.0.1:8010`
