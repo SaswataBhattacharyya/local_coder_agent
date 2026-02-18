@@ -292,6 +292,7 @@ class AgentViewProvider {
         await this.mcpStatus();
     }
     async loadModels() {
+        await this.ensureInit();
         const res = await this.api.get("/models");
         if (!res.ok) {
             this.modelInfo = null;

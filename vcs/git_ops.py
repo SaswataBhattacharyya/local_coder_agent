@@ -15,14 +15,14 @@ class GitOps:
     def ensure_repo(self) -> None:
         if not (self.repo_root / ".git").exists():
             subprocess.run(["git", "init"], cwd=self.repo_root, check=True)
-            subprocess.run(["git", "add", "-A"], cwd=self.repo_root, check=True)
+            subprocess.run(["git", "config", "user.email", "agent@local"], cwd=self.repo_root, check=False)
+            subprocess.run(["git", "config", "user.name", "Local Agent"], cwd=self.repo_root, check=False)
+            subprocess.run(["git", "add", "-A"], cwd=self.repo_root, check=False)
             try:
                 subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_root, check=True)
             except subprocess.CalledProcessError:
-                # Configure local identity if missing (for stateless repos)
-                subprocess.run(["git", "config", "user.email", "agent@local"], cwd=self.repo_root, check=False)
-                subprocess.run(["git", "config", "user.name", "Local Agent"], cwd=self.repo_root, check=False)
-                subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_root, check=True)
+                # If nothing to commit, create an empty commit
+                subprocess.run(["git", "commit", "--allow-empty", "-m", "init"], cwd=self.repo_root, check=True)
         self.ring_file.parent.mkdir(parents=True, exist_ok=True)
         if not self.ring_file.exists():
             self.ring_file.write_text(json.dumps({"restore_points": []}, indent=2))
