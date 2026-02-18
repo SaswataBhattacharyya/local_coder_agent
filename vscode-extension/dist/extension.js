@@ -526,13 +526,7 @@ class AgentViewProvider {
         chatEl.innerHTML = "";
         (msg.messages || []).forEach(m => {
           const div = document.createElement("div");
-          div.className = `;
-        msg;
-        $;
-        {
-            m.role;
-        }
-        `;
+          div.className = "msg " + m.role;
           div.textContent = m.text;
           chatEl.appendChild(div);
         });

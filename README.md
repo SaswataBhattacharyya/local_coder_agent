@@ -59,6 +59,10 @@ In the extension UI you can:
 - Configure Restore Remote
 - Allow/Revoke MCP and reload MCP config
 
+## VSCode Extension Build Notes
+- Requires Node.js >= 18 for dev build
+- If npm shows EBADENGINE for undici, upgrade Node to 20 or use VSCode's extension dev host with bundled Node
+
 ## Notes
 
 - Shell commands are **gated**: the server will require explicit confirmation tokens.

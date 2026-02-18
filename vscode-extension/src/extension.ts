@@ -25,7 +25,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     this.view = view;
     view.webview.options = { enableScripts: true };
     view.webview.html = this.getHtml(view.webview);
-    view.webview.onDidReceiveMessage(async (msg) => {
+    view.webview.onDidReceiveMessage(async (msg: any) => {
       switch (msg.type) {
         case "send":
           await this.handleUserMessage(msg.text);
