@@ -180,15 +180,16 @@ def init(req: InitRequest):
 def query(req: QueryRequest):
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
-    _ensure_repo_map()
     planner = QueryPlanner(STATE["session"])
     result = planner.analyze(
         req.user_text,
         repo_root_known=STATE["repo_root"] is not None,
         has_pending_patch=STATE.get("pending_diff") is not None,
     )
+    if result.intent in ("EDIT", "COMMAND"):
+        _ensure_repo_map()
     plan = result.plan
-    if result.state == "READY":
+    if result.state == "READY" and result.intent not in ("INFO",):
         try:
             plan = _generate_plan_llm(req.user_text)
         except Exception:

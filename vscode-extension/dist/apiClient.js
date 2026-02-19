@@ -36,6 +36,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ApiClient = void 0;
 const vscode = __importStar(require("vscode"));
 class ApiClient {
+    constructor(log) {
+        this.log = log;
+    }
     get baseUrl() {
         const cfg = vscode.workspace.getConfiguration("localCodeAgent");
         return cfg.get("serverUrl", "http://127.0.0.1:8010").replace(/\/$/, "");
@@ -53,11 +56,15 @@ class ApiClient {
     }
     async post(path, body) {
         try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 60000);
             const res = await fetch(`${this.baseUrl}${path}`, {
                 method: "POST",
                 headers: this.headers(),
                 body: JSON.stringify(body),
+                signal: controller.signal,
             });
+            clearTimeout(timeout);
             const text = await res.text();
             const json = text ? JSON.parse(text) : {};
             if (!res.ok) {
@@ -66,15 +73,21 @@ class ApiClient {
             return { ok: true, data: json };
         }
         catch (err) {
-            return { ok: false, error: err?.message || "Request failed" };
+            const msg = err?.message || "Request failed";
+            this.log?.(`POST ${path} failed: ${msg}`);
+            return { ok: false, error: `${msg} (server: ${this.baseUrl})` };
         }
     }
     async get(path) {
         try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 60000);
             const res = await fetch(`${this.baseUrl}${path}`, {
                 method: "GET",
                 headers: this.headers(),
+                signal: controller.signal,
             });
+            clearTimeout(timeout);
             const text = await res.text();
             const json = text ? JSON.parse(text) : {};
             if (!res.ok) {
@@ -83,7 +96,9 @@ class ApiClient {
             return { ok: true, data: json };
         }
         catch (err) {
-            return { ok: false, error: err?.message || "Request failed" };
+            const msg = err?.message || "Request failed";
+            this.log?.(`GET ${path} failed: ${msg}`);
+            return { ok: false, error: `${msg} (server: ${this.baseUrl})` };
         }
     }
 }

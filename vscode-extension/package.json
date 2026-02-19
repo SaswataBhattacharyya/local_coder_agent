@@ -8,7 +8,9 @@
     "vscode": "^1.86.0",
     "node": ">=18"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
     "onView:localCodeAgent.chatView",
     "onCommand:localCodeAgent.ping",
@@ -42,15 +44,42 @@
       ]
     },
     "commands": [
-      { "command": "localCodeAgent.ping", "title": "Local Code Agent: Ping Server" },
-      { "command": "localCodeAgent.propose", "title": "Local Code Agent: Propose" },
-      { "command": "localCodeAgent.revise", "title": "Local Code Agent: Revise Pending" },
-      { "command": "localCodeAgent.approve", "title": "Local Code Agent: Approve Pending" },
-      { "command": "localCodeAgent.reject", "title": "Local Code Agent: Reject Pending" },
-      { "command": "localCodeAgent.resetContext", "title": "Local Code Agent: Reset Context" },
-      { "command": "localCodeAgent.mcpAllow", "title": "Local Code Agent: MCP Allow" },
-      { "command": "localCodeAgent.mcpRevoke", "title": "Local Code Agent: MCP Revoke" },
-      { "command": "localCodeAgent.mcpStatus", "title": "Local Code Agent: MCP Status" }
+      {
+        "command": "localCodeAgent.ping",
+        "title": "Local Code Agent: Ping Server"
+      },
+      {
+        "command": "localCodeAgent.propose",
+        "title": "Local Code Agent: Propose"
+      },
+      {
+        "command": "localCodeAgent.revise",
+        "title": "Local Code Agent: Revise Pending"
+      },
+      {
+        "command": "localCodeAgent.approve",
+        "title": "Local Code Agent: Approve Pending"
+      },
+      {
+        "command": "localCodeAgent.reject",
+        "title": "Local Code Agent: Reject Pending"
+      },
+      {
+        "command": "localCodeAgent.resetContext",
+        "title": "Local Code Agent: Reset Context"
+      },
+      {
+        "command": "localCodeAgent.mcpAllow",
+        "title": "Local Code Agent: MCP Allow"
+      },
+      {
+        "command": "localCodeAgent.mcpRevoke",
+        "title": "Local Code Agent: MCP Revoke"
+      },
+      {
+        "command": "localCodeAgent.mcpStatus",
+        "title": "Local Code Agent: MCP Status"
+      }
     ],
     "configuration": {
       "title": "Local Code Agent",
@@ -85,9 +114,9 @@
     "package": "npx @vscode/vsce package"
   },
   "devDependencies": {
-    "@types/vscode": "^1.86.0",
     "@types/node": "^20.11.30",
-    "esbuild": "^0.20.2",
+    "@types/vscode": "^1.86.0",
+    "esbuild": "^0.27.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.4.5"

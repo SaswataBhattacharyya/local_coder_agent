@@ -8,8 +8,10 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "localCodeAgent.chatView";
 
   private view?: vscode.WebviewView;
-  private api = new ApiClient();
+  private output = vscode.window.createOutputChannel("Local Code Agent");
+  private api = new ApiClient((msg) => this.output.appendLine(msg));
   private messages: ChatMessage[] = [];
+  private progress: { text: string; status: "running" | "done" | "error" }[] = [];
   private pending: PendingPatch | null = null;
   private status: string = "Not connected";
   private serverUrl: string = "";
@@ -72,25 +74,27 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.messages.push({ role: "user", text, timestamp: Date.now() });
-    this.messages.push({ role: "system", text: "Planning request…", timestamp: Date.now() });
-    this.messages.push({ role: "system", text: "Reading repo metadata…", timestamp: Date.now() });
-    this.messages.push({ role: "system", text: "Building task plan…", timestamp: Date.now() });
+    this.progress = [];
+    this.pushProgress("Connecting to server…", "running");
     this.refresh();
     await this.ensureInit();
+    this.markProgressDone("Connecting to server…");
+    this.pushProgress("Planning request…", "running");
     const res = await this.api.post<{ state: string; questions: string[] }>("/query", { user_text: text });
     if (!res.ok) {
+      this.markProgressError("Planning request…");
       this.messages.push({ role: "assistant", text: `Query failed: ${res.error}`, timestamp: Date.now() });
       this.refresh();
       return;
     }
-    this.trimPlanningStatus();
+    this.markProgressDone("Planning request…");
     if (res.data.questions && res.data.questions.length > 0) {
-      this.messages.push({ role: "system", text: "Need clarification before proceeding.", timestamp: Date.now() });
+      this.pushProgress("Need clarification before proceeding.", "done");
       this.messages.push({ role: "assistant", text: res.data.questions.join("\n"), timestamp: Date.now() });
       this.refresh();
     }
     if (!res.data.questions || res.data.questions.length === 0) {
-      this.messages.push({ role: "system", text: "Plan ready.", timestamp: Date.now() });
+      this.pushProgress("Plan ready.", "done");
       this.refresh();
     }
   }
@@ -213,7 +217,6 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     this.refresh();
   }
 
-  private async approve(): Promise<void> {
   private async approve(diffOverride?: string): Promise<void> {
     if (!this.pending) {
       vscode.window.showWarningMessage("No pending patch");
@@ -396,24 +399,23 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
         mcpStatusText: this.mcpStatusText,
         snapshotsText: this.snapshotsText,
         ingestStatusText: this.ingestStatusText,
+        progress: this.progress,
       });
     }
   }
 
-  private trimPlanningStatus(): void {
-    const statuses = new Set([
-      "Planning request…",
-      "Reading repo metadata…",
-      "Building task plan…",
-    ]);
-    while (this.messages.length) {
-      const last = this.messages[this.messages.length - 1];
-      if (last.role === "system" && statuses.has(last.text)) {
-        this.messages.pop();
-        continue;
-      }
-      break;
-    }
+  private pushProgress(text: string, status: "running" | "done" | "error"): void {
+    this.progress.push({ text, status });
+  }
+
+  private markProgressDone(text: string): void {
+    const item = this.progress.find((p) => p.text === text);
+    if (item) item.status = "done";
+  }
+
+  private markProgressError(text: string): void {
+    const item = this.progress.find((p) => p.text === text);
+    if (item) item.status = "error";
   }
 
   private getHtml(webview: vscode.Webview): string {

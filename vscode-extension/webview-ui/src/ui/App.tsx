@@ -13,6 +13,7 @@ type AgentState = {
   mcpStatusText: string;
   snapshotsText: string;
   ingestStatusText: string;
+  progress?: { text: string; status: "running" | "done" | "error" }[];
 };
 
 const vscode = (window as any).acquireVsCodeApi?.();
@@ -28,6 +29,7 @@ export const App: React.FC = () => {
     mcpStatusText: "",
     snapshotsText: "",
     ingestStatusText: "",
+    progress: [],
   });
 
   const diffFiles = useMemo<DiffFile[]>(() => {
@@ -120,7 +122,16 @@ export const App: React.FC = () => {
       </div>
 
       {tab === "chat" && (
-        <div className="section">
+        <div className="section chat-section">
+          {state.progress && state.progress.length > 0 && (
+            <div className="progress">
+              {state.progress.map((p, i) => (
+                <div key={i} className={`progress-item ${p.status}`}>
+                  <span className={p.status === "running" ? "dotdot" : ""}>{p.text}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="chat">
             {state.messages.map((m, idx) => (
               <div key={idx} className={`msg ${m.role}`}>{m.text}</div>
