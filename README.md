@@ -12,7 +12,7 @@ The bootstrap script will:
 - create a local `venv/`
 - install python deps
 - ask for GPU VRAM (or auto-detect)
-- optionally ask for a restore git repo URL (for backup of restore points)
+- snapshots are local-only and stored under `.agent/snapshots` (last 3 kept)
 - download GGUF models (reasoner, coder, optional VLM)
 - start the local FastAPI server
 
@@ -27,9 +27,10 @@ One-shot local (server + VSCode UI):
 ```
 
 ## Restore Remote (Optional)
-- You can set or disable the restore remote after init:
-  - `POST /restore_remote` with `{ "restore_remote_url": "https://..." }`
-  - Empty or invalid URL disables restore backup.
+- Snapshot endpoints:
+  - `GET /snapshots`
+  - `POST /snapshots/create`
+  - `POST /snapshots/restore`
   - Optional `push_on_approve: true|false` toggles automatic push on approval.
 
 Then set VSCode setting:
@@ -89,8 +90,7 @@ In the extension UI you can:
 ## Notes
 
 - Shell commands are **gated**: the server will require explicit confirmation tokens.
-- Edits are **staged** as pending patches until approved (git commit on approval).
-- Stateless mode (when server can't access your workspace) will auto-configure a local git identity.
+- Edits are **staged** as pending patches until approved (snapshot created on approval).
 
 ## MCP (Optional)
 
@@ -152,7 +152,7 @@ context_ingest:
 
 ## Agent State Branching
 
-Agent state is stored under `.agent/state/` and is separate from git branches.
+Agent state is stored under `.agent/state/` and is separate from snapshots.
 Each session has branches with its own pending patch and notes.
 
 Layout:

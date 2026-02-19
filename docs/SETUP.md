@@ -114,6 +114,12 @@ Configure via `configs/config.yaml` under `context_ingest`.
 - In VM/Runpod mode, `mcp.json` must exist on the VM/Runpod filesystem (server side).
 - After editing, click **MCP Reload** in the extension UI (or call `/mcp/reload`).
 
+## Snapshots (Local Restore)
+
+- Snapshots are local-only and stored under `.agent/snapshots`.
+- Use the **History** tab in the UI to create and restore snapshots.
+- The system keeps the last 3 snapshots by default.
+
 ## Helper Script
 
 You can print setup steps based on environment:

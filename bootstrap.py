@@ -87,11 +87,8 @@ def set_config_quant(hint: str) -> None:
     cfg.write_text(yaml.safe_dump(data, sort_keys=False))
 
 def set_restore_remote(url: str) -> None:
-    cfg = ROOT / "configs" / "config.yaml"
-    data = yaml.safe_load(cfg.read_text())
-    data.setdefault("restore", {})
-    data["restore"]["remote_url"] = url.strip()
-    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
+    # Deprecated: git-based restore removed. Keep for backward compatibility.
+    return None
 
 def install_rlm() -> None:
     py = str(venv_python())
@@ -142,9 +139,7 @@ def main():
     hint = choose_quant_hint(vram)
     print(f"[INFO] Using quant hint: {hint}")
     set_config_quant(hint)
-    restore_url = input("Optional: enter git repo URL for restore backup (leave blank to disable revert backup): ").strip()
-    if restore_url:
-        set_restore_remote(restore_url)
+    print("Snapshot restore is local-only (no git). Use the UI History tab to create/restore snapshots.")
     download_models(hint)
     print("[READY] Starting server at http://localhost:8010/docs")
     start_server()

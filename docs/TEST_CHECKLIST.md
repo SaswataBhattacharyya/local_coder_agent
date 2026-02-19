@@ -11,7 +11,9 @@
 - `POST /mcp/allow` sets mcp_allowed=true
 - `POST /mcp/revoke` sets mcp_allowed=false
 - `GET /mcp/status` returns mcp_allowed + allowed_domains
-- `POST /restore_remote` with empty disables
+- `GET /snapshots` returns list
+- `POST /snapshots/create` creates snapshot
+- `POST /snapshots/restore` restores snapshot
 - `GET /models` returns model lists
 - `POST /models/select` updates selection
 - `POST /mcp/reload` reloads config
@@ -32,7 +34,7 @@
 - Reset Context clears pending and conversation
 - MCP Allow / Revoke / Status work and show output
 - Model dropdowns update selections
-- Restore Remote buttons work
+- Snapshot buttons work (create/restore)
 - `scripts/start_ui.sh` opens VSCode and sets serverUrl
 
 ## VM/Runpod

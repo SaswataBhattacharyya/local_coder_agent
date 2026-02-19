@@ -16,7 +16,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
   private modelInfo: any = null;
   private modelStatusText: string = "";
   private mcpStatusText: string = "";
-  private restoreStatusText: string = "";
+  private snapshotsText: string = "";
   private ingestStatusText: string = "";
 
   constructor(private readonly context: vscode.ExtensionContext) {}
@@ -60,6 +60,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     this.status = "Connected";
     await this.loadModels(false);
+    await this.snapshotsRefresh();
     this.refresh();
   }
 
@@ -117,11 +118,14 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       case "modelsRefresh":
         await this.loadModels(true);
         break;
-      case "restoreSet":
-        await this.setRestoreRemote();
+      case "snapshotsRefresh":
+        await this.snapshotsRefresh();
         break;
-      case "restoreDisable":
-        await this.disableRestoreRemote();
+      case "snapshotCreate":
+        await this.snapshotCreate();
+        break;
+      case "snapshotRestore":
+        await this.snapshotRestore();
         break;
     }
   }
@@ -272,6 +276,39 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     await this.mcpStatus();
   }
 
+  private async snapshotsRefresh(): Promise<void> {
+    const res = await this.api.get<any>("/snapshots");
+    if (!res.ok) {
+      vscode.window.showErrorMessage(`Snapshots failed: ${res.error}`);
+      return;
+    }
+    this.snapshotsText = JSON.stringify(res.data, null, 2);
+    this.refresh();
+  }
+
+  private async snapshotCreate(): Promise<void> {
+    const message = await vscode.window.showInputBox({ prompt: "Snapshot message (optional)" });
+    const res = await this.api.post<any>("/snapshots/create", { message });
+    if (!res.ok) {
+      vscode.window.showErrorMessage(`Snapshot create failed: ${res.error}`);
+      return;
+    }
+    this.snapshotsText = JSON.stringify(res.data, null, 2);
+    this.refresh();
+  }
+
+  private async snapshotRestore(): Promise<void> {
+    const id = await vscode.window.showInputBox({ prompt: "Snapshot ID to restore" });
+    if (!id) return;
+    const res = await this.api.post<any>("/snapshots/restore", { snapshot_id: id });
+    if (!res.ok) {
+      vscode.window.showErrorMessage(`Snapshot restore failed: ${res.error}`);
+      return;
+    }
+    this.snapshotsText = JSON.stringify(res.data, null, 2);
+    this.refresh();
+  }
+
   private async loadModels(callInit: boolean = true): Promise<void> {
     if (callInit) {
       await this.ensureInit();
@@ -317,32 +354,6 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     return `${id}${provider}`;
   }
 
-  private async setRestoreRemote(): Promise<void> {
-    const url = await vscode.window.showInputBox({ prompt: "Restore remote URL (leave blank to cancel)" });
-    if (!url) {
-      return;
-    }
-    const pushChoice = await vscode.window.showQuickPick(["push on approve", "do not push"], { placeHolder: "Push commits to remote on approval?" });
-    const pushOnApprove = pushChoice === "push on approve";
-    const res = await this.api.post<any>("/restore_remote", { restore_remote_url: url, push_on_approve: pushOnApprove });
-    if (!res.ok) {
-      vscode.window.showErrorMessage(`Restore remote failed: ${res.error}`);
-      return;
-    }
-    this.restoreStatusText = JSON.stringify(res.data, null, 2);
-    this.refresh();
-  }
-
-  private async disableRestoreRemote(): Promise<void> {
-    const res = await this.api.post<any>("/restore_remote", { restore_remote_url: "" });
-    if (!res.ok) {
-      vscode.window.showErrorMessage(`Disable restore remote failed: ${res.error}`);
-      return;
-    }
-    this.restoreStatusText = JSON.stringify(res.data, null, 2);
-    this.refresh();
-  }
-
   private async openDiffPreview(diffText: string): Promise<void> {
     const doc = await vscode.workspace.openTextDocument({ content: diffText, language: "diff" });
     await vscode.window.showTextDocument(doc, { preview: true });
@@ -359,7 +370,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
         modelInfo: this.modelInfo,
         modelStatusText: this.modelStatusText,
         mcpStatusText: this.mcpStatusText,
-        restoreStatusText: this.restoreStatusText,
+        snapshotsText: this.snapshotsText,
         ingestStatusText: this.ingestStatusText,
       });
     }
@@ -375,83 +386,114 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Local Code Agent</title>
   <style>
-    body { font-family: Segoe UI, sans-serif; padding: 10px; color: #e6edf3; background: #0d1117; }
-    h3 { margin: 10px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #8b949e; }
-    .chat { border: 1px solid #30363d; padding: 8px; border-radius: 8px; min-height: 120px; background: #161b22; }
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #4c8df6;
+      --ok: #2ea043;
+      --warn: #d29922;
+      --border: #30363d;
+    }
+    body { font-family: Segoe UI, sans-serif; padding: 10px; color: var(--text); background: var(--bg); }
+    h3 { margin: 10px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+    .tabs { display:flex; gap:6px; margin: 6px 0 10px; }
+    .tab { padding:6px 10px; border-radius: 8px; background: var(--panel); border:1px solid var(--border); cursor:pointer; font-size:12px; }
+    .tab.active { background: var(--accent); border-color: var(--accent); color:#fff; }
+    .section { display:none; }
+    .section.active { display:block; }
+    .chat { border: 1px solid var(--border); padding: 8px; border-radius: 8px; min-height: 120px; background: var(--panel); }
     .msg { margin: 6px 0; padding: 6px 8px; border-radius: 6px; white-space: pre-wrap; }
-    .user { background: #238636; color: #fff; }
+    .user { background: var(--ok); color: #fff; }
     .assistant { background: #1f6feb; color: #fff; }
     .system { background: #6e7681; color: #fff; }
-    .pending { border: 1px dashed #58a6ff; padding: 8px; border-radius: 8px; background: #0d1117; }
+    .pending { border: 1px dashed #58a6ff; padding: 8px; border-radius: 8px; background: var(--bg); }
     textarea { width: 100%; height: 64px; resize: vertical; }
     .row { display: flex; gap: 6px; flex-wrap: wrap; }
-    button { background: #30363d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; cursor: pointer; }
+    button { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; cursor: pointer; }
     button:hover { background: #3b4252; }
-    .status { font-size: 12px; color: #8b949e; }
+    .status { font-size: 12px; color: var(--muted); }
     .diff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: pre; overflow-x: auto; background: #0b0f14; padding: 6px; border-radius: 6px; }
   </style>
 </head>
 <body>
-  <div style="font-size:12px;color:#8b949e;margin-bottom:6px;">Local Code Agent UI Loaded</div>
+  <div style="font-size:12px;color:#8b949e;margin-bottom:6px;">Local Code Agent</div>
   <div class="status">Status: <span id="status">Not connected</span></div>
   <div class="status">Server: <span id="serverUrl"></span></div>
 
-  <h3>Models</h3>
-  <div class="diff" id="modelStatus"></div>
-  <div class="row">
-    <label>Reasoner:</label>
-    <select id="reasonerSelect"></select>
-  </div>
-  <div class="row">
-    <label>Coder:</label>
-    <select id="coderSelect"></select>
-  </div>
-  <div class="row">
-    <button data-action="modelsRefresh">Refresh Models</button>
+  <div class="tabs">
+    <div class="tab active" data-tab="chat">Chat</div>
+    <div class="tab" data-tab="settings">Settings</div>
+    <div class="tab" data-tab="history">History</div>
+    <div class="tab" data-tab="mcp">MCP</div>
   </div>
 
-  <h3>Conversation</h3>
-  <div class="chat" id="chat"></div>
+  <div class="section active" id="tab-chat">
+    <h3>Conversation</h3>
+    <div class="chat" id="chat"></div>
 
-  <h3>Input</h3>
-  <textarea id="input" placeholder="Describe your request..."></textarea>
-  <div class="row">
-    <button id="send">Send</button>
-    <button data-action="ping">Ping Server</button>
+    <h3>Input</h3>
+    <textarea id="input" placeholder="Describe your request..."></textarea>
+    <div class="row">
+      <button id="send">Send</button>
+      <button data-action="ping">Ping Server</button>
+    </div>
+
+    <h3>Pending Patch</h3>
+    <div class="pending">
+      <div><strong>Summary:</strong> <span id="summary"></span></div>
+      <div><strong>Risk:</strong> <span id="risk"></span></div>
+      <div><strong>Ingest:</strong> <span id="ingest"></span></div>
+      <div class="diff" id="diff"></div>
+    </div>
+
+    <h3>Actions</h3>
+    <div class="row">
+      <button data-action="propose">Propose</button>
+      <button data-action="revise">Revise Pending</button>
+      <button data-action="approve">Approve Pending</button>
+      <button data-action="reject">Reject Pending</button>
+      <button data-action="reset">Reset Context</button>
+    </div>
   </div>
 
-  <h3>Pending Patch</h3>
-  <div class="pending">
-    <div><strong>Summary:</strong> <span id="summary"></span></div>
-    <div><strong>Risk:</strong> <span id="risk"></span></div>
-    <div><strong>Ingest:</strong> <span id="ingest"></span></div>
-    <div class="diff" id="diff"></div>
+  <div class="section" id="tab-settings">
+    <h3>Models</h3>
+    <div class="diff" id="modelStatus"></div>
+    <div class="row">
+      <label>Reasoner:</label>
+      <select id="reasonerSelect"></select>
+    </div>
+    <div class="row">
+      <label>Coder:</label>
+      <select id="coderSelect"></select>
+    </div>
+    <div class="row">
+      <button data-action="modelsRefresh">Refresh Models</button>
+    </div>
   </div>
 
-  <h3>Actions</h3>
-  <div class="row">
-    <button data-action="propose">Propose</button>
-    <button data-action="revise">Revise Pending</button>
-    <button data-action="approve">Approve Pending</button>
-    <button data-action="reject">Reject Pending</button>
-    <button data-action="reset">Reset Context</button>
+  <div class="section" id="tab-history">
+    <h3>Snapshots</h3>
+    <div class="row">
+      <button data-action="snapshotsRefresh">Refresh</button>
+      <button data-action="snapshotCreate">Create Snapshot</button>
+      <button data-action="snapshotRestore">Restore Snapshot</button>
+    </div>
+    <div class="diff" id="snapshotsStatus"></div>
   </div>
 
-  <h3>MCP</h3>
-  <div class="row">
-    <button data-action="mcpAllow">MCP Allow</button>
-    <button data-action="mcpRevoke">MCP Revoke</button>
-    <button data-action="mcpStatus">MCP Status</button>
-    <button data-action="mcpReload">MCP Reload</button>
+  <div class="section" id="tab-mcp">
+    <h3>MCP</h3>
+    <div class="row">
+      <button data-action="mcpAllow">MCP Allow</button>
+      <button data-action="mcpRevoke">MCP Revoke</button>
+      <button data-action="mcpStatus">MCP Status</button>
+      <button data-action="mcpReload">MCP Reload</button>
+    </div>
+    <div class="diff" id="mcpStatus"></div>
   </div>
-  <div class="diff" id="mcpStatus"></div>
-
-  <h3>Restore Remote</h3>
-  <div class="row">
-    <button data-action="restoreSet">Set Restore Remote</button>
-    <button data-action="restoreDisable">Disable Restore Remote</button>
-  </div>
-  <div class="diff" id="restoreStatus"></div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
@@ -463,7 +505,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     const coderSelect = document.getElementById("coderSelect");
     const modelStatusEl = document.getElementById("modelStatus");
     const mcpStatusEl = document.getElementById("mcpStatus");
-    const restoreStatusEl = document.getElementById("restoreStatus");
+    const snapshotsEl = document.getElementById("snapshotsStatus");
     const ingestEl = document.getElementById("ingest");
     const summaryEl = document.getElementById("summary");
     const riskEl = document.getElementById("risk");
@@ -477,6 +519,16 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     document.querySelectorAll("button[data-action]").forEach(btn => {
       btn.addEventListener("click", () => {
         vscode.postMessage({ type: "action", action: btn.dataset.action });
+      });
+    });
+
+    document.querySelectorAll(".tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+        document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+        tab.classList.add("active");
+        const target = document.getElementById(`tab-${tab.dataset.tab}`);
+        if (target) target.classList.add("active");
       });
     });
 
@@ -513,7 +565,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
         fillSelect(coderSelect, msg.modelInfo, "coder");
         modelStatusEl.textContent = msg.modelStatusText || "";
         mcpStatusEl.textContent = msg.mcpStatusText || "";
-        restoreStatusEl.textContent = msg.restoreStatusText || "";
+        snapshotsEl.textContent = msg.snapshotsText || "";
         ingestEl.textContent = msg.ingestStatusText || "";
         chatEl.innerHTML = "";
         (msg.messages || []).forEach(m => {

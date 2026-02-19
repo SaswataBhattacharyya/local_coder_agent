@@ -25,7 +25,7 @@ from server.tasks import TaskQueue, TaskWorker
 from rlm_wrap.context import reset_context, build_minimal_meta
 from mcp.registry import MCPRegistry
 from mcp.policy import load_policy, load_state, save_state, is_risky_tool
-from vcs.git_ops import GitOps
+from vcs.snapshot_cache import SnapshotCache
 from patcher.staging import StagingArea
 from indexer.indexer import SymbolIndexer
 
@@ -34,12 +34,7 @@ CONFIG_PATH = APP_ROOT / "configs" / "config.yaml"
 
 class InitRequest(BaseModel):
     repo_root: str
-    restore_remote_url: str | None = None
     allow_missing_repo: bool = False
-
-class RestoreRemoteRequest(BaseModel):
-    restore_remote_url: str
-    push_on_approve: bool | None = None
 
 class ProposeRequest(BaseModel):
     instruction: str
@@ -116,7 +111,7 @@ MCP_POLICY = load_policy(MCP_CONFIG_PATH)
 
 STATE = {
     "repo_root": None,
-    "git": None,
+    "snapshots": None,
     "staging": None,
     "indexer": None,
     "pending_diff": None,
@@ -144,16 +139,7 @@ def init(req: InitRequest):
                 repo.mkdir(parents=True, exist_ok=True)
         else:
             raise HTTPException(400, f"repo_root not found: {repo}")
-    ring = repo / ".agent" / "restore_ring.json"
-    restore_url = req.restore_remote_url if req.restore_remote_url else CONFIG.restore.remote_url
-    git = GitOps(
-        repo_root=repo,
-        ring_file=ring,
-        restore_remote_url=restore_url or None,
-        restore_remote_name=CONFIG.restore.remote_name,
-        push_on_approve=CONFIG.restore.push_on_approve,
-    )
-    git.ensure_repo()
+    snapshots = SnapshotCache(repo_root=repo, max_snapshots=3)
     staging = StagingArea(repo_root=repo, staging_root=repo / ".agent" / "staging")
     indexer = SymbolIndexer(repo_root=repo, db_path=repo / ".agent" / "index.sqlite")
     dep_graph = DependencyGraph(repo_root=repo, db_path=repo / ".agent" / "deps.sqlite")
@@ -163,14 +149,14 @@ def init(req: InitRequest):
     else:
         indexer.index_all()
 
-    STATE.update(repo_root=str(repo), git=git, staging=staging, indexer=indexer, pending_diff=None, dep_graph=dep_graph)
+    STATE.update(repo_root=str(repo), snapshots=snapshots, staging=staging, indexer=indexer, pending_diff=None, dep_graph=dep_graph)
     STATE["session"] = AgentSession(state=AgentState.IDLE)
     mcp_state = load_state(repo)
     STATE["mcp_allowed"] = bool(mcp_state.get("mcp_allowed", False))
     _reload_mcp_config(repo)
     minimal = build_minimal_meta(
         repo_root=repo,
-        head=git.get_head(),
+        head=snapshots.get_head(),
         model_cfg={"reasoner": CONFIG.reasoner.__dict__, "coder": CONFIG.coder.__dict__, "vlm": CONFIG.vlm.__dict__},
         index_path=indexer.db_path,
     )
@@ -184,46 +170,7 @@ def init(req: InitRequest):
         worker = TaskWorker(STATE["task_queue"], _handle_task)
         worker.start()
         STATE["task_worker"] = worker
-    return {"status":"ok", "repo_root": str(repo), "restore_points": git.list_restore_points()}
-
-@app.post("/restore_remote")
-def restore_remote(req: RestoreRemoteRequest):
-    if STATE["repo_root"] is None:
-        raise HTTPException(400, "init first")
-    url = req.restore_remote_url.strip()
-    if not url:
-        STATE["git"].restore_remote_url = None
-        STATE["git"]._ensure_restore_remote()
-        if req.push_on_approve is not None:
-            STATE["git"].push_on_approve = req.push_on_approve
-        return {"status": "ok", "restore_remote_url": "", "disabled": True, "push_on_approve": STATE["git"].push_on_approve}
-    # Validate remote URL
-    try:
-        subprocess.run(
-            ["git", "ls-remote", url],
-            cwd=STATE["repo_root"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except subprocess.CalledProcessError:
-        STATE["git"].restore_remote_url = None
-        STATE["git"]._ensure_restore_remote()
-        if req.push_on_approve is not None:
-            STATE["git"].push_on_approve = req.push_on_approve
-        return {
-            "status": "ok",
-            "restore_remote_url": "",
-            "disabled": True,
-            "message": "invalid remote; restore disabled",
-            "push_on_approve": STATE["git"].push_on_approve,
-        }
-    STATE["git"].restore_remote_url = url
-    STATE["git"]._ensure_restore_remote()
-    if req.push_on_approve is not None:
-        STATE["git"].push_on_approve = req.push_on_approve
-    return {"status": "ok", "restore_remote_url": url, "push_on_approve": STATE["git"].push_on_approve}
+    return {"status":"ok", "repo_root": str(repo), "snapshots": snapshots.list_snapshots()}
 
 @app.post("/query")
 def query(req: QueryRequest):
@@ -608,8 +555,6 @@ def approve(req: ApproveRequest):
         raise HTTPException(400, "init first")
     if STATE["pending_diff"] is None:
         raise HTTPException(400, "no pending diff")
-    if STATE["git"].status_dirty():
-        raise HTTPException(409, "repo has uncommitted changes; please clean or revert before approval")
     if req.unified_diff != STATE["pending_diff"]:
         raise HTTPException(400, "approved diff does not match pending diff")
     try:
@@ -620,14 +565,7 @@ def approve(req: ApproveRequest):
         STATE["staging"].apply_unified_diff_to_repo(req.unified_diff)
     except Exception as exc:
         raise HTTPException(400, str(exc))
-    message = req.message
-    if not message or message == "Approved change":
-        message = STATE["git"].commit_message_from_diff(req.unified_diff, fallback="Approved change")
-    sha = STATE["git"].commit_approved(message)
-    push_ok = None
-    push_msg = ""
-    if STATE["git"].push_on_approve:
-        push_ok, push_msg = STATE["git"].push_head()
+    message = req.message or "Approved change"
     # Re-index (MVP full re-index; later incremental)
     STATE["indexer"].index_all()
     # Clear pending context + reset RLM vars
@@ -637,21 +575,21 @@ def approve(req: ApproveRequest):
     if STATE.get("state_store"):
         STATE["state_store"].clear_pending_patch()
         try:
-            STATE["state_store"].snapshot(sha, message="approved")
+            STATE["state_store"].snapshot(STATE["snapshots"].get_head(), message="approved")
         except Exception:
             pass
+    snap_meta = STATE["snapshots"].snapshot(message=message)
     minimal = build_minimal_meta(
         repo_root=Path(STATE["repo_root"]),
-        head=sha,
+        head=STATE["snapshots"].get_head(),
         model_cfg={"reasoner": CONFIG.reasoner.__dict__, "coder": CONFIG.coder.__dict__, "vlm": CONFIG.vlm.__dict__},
         index_path=STATE["indexer"].db_path,
     )
     reset_context(Path(STATE["repo_root"]), minimal)
     return {
         "status":"ok",
-        "commit": sha,
-        "restore_points": STATE["git"].list_restore_points(),
-        "restore_push": {"ok": push_ok, "message": push_msg},
+        "snapshot": snap_meta.__dict__,
+        "snapshots": STATE["snapshots"].list_snapshots(),
     }
 
 @app.post("/reject")
@@ -666,31 +604,38 @@ def reject():
         STATE["state_store"].clear_pending_patch()
     return {"status":"ok"}
 
-@app.get("/restore_points")
-def restore_points():
-    if STATE["git"] is None:
+@app.get("/snapshots")
+def snapshots_list():
+    if STATE.get("snapshots") is None:
         raise HTTPException(400, "init first")
-    return {"restore_points": STATE["git"].list_restore_points()}
+    return {"snapshots": STATE["snapshots"].list_snapshots()}
 
-class RevertRequest(BaseModel):
-    sha: str
+class SnapshotCreateRequest(BaseModel):
+    message: str | None = None
 
-@app.post("/revert")
-def revert(req: RevertRequest):
-    if STATE["git"] is None:
+@app.post("/snapshots/create")
+def snapshots_create(req: SnapshotCreateRequest):
+    if STATE.get("snapshots") is None:
         raise HTTPException(400, "init first")
-    STATE["git"].hard_reset_to(req.sha)
+    meta = STATE["snapshots"].snapshot(message=req.message or "manual")
+    return {"status": "ok", "snapshot": meta.__dict__, "snapshots": STATE["snapshots"].list_snapshots()}
+
+@app.post("/snapshots/restore")
+def snapshots_restore(req: SnapshotRestoreRequest):
+    if STATE.get("snapshots") is None:
+        raise HTTPException(400, "init first")
+    STATE["snapshots"].restore(req.snapshot_id)
     STATE["indexer"].index_all()
     STATE["pending_diff"] = None
     STATE["pending_summary"] = ""
     STATE["pending_risk"] = ""
-    return {"status":"ok", "head": req.sha}
+    return {"status": "ok", "head": STATE["snapshots"].get_head()}
 
 @app.post("/reset_context")
 def reset_context_endpoint():
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
-    head = STATE["git"].get_head()
+    head = STATE["snapshots"].get_head()
     minimal = build_minimal_meta(
         repo_root=Path(STATE["repo_root"]),
         head=head,
@@ -750,7 +695,7 @@ def agent_state_snapshot(req: SnapshotRequest):
     if STATE.get("state_store") is None:
         raise HTTPException(400, "no session")
     store: AgentStateStore = STATE["state_store"]
-    snap = store.snapshot(STATE["git"].get_head(), message=req.message or "")
+    snap = store.snapshot(STATE["snapshots"].get_head(), message=req.message or "")
     return {"snapshot_id": snap}
 
 @app.post("/agent_state/restore")
