@@ -24,7 +24,7 @@ from indexer.repo_map import RepoMapBuilder
 from server.tasks import TaskQueue, TaskWorker
 from rlm_wrap.context import reset_context, build_minimal_meta
 from mcp.registry import MCPRegistry
-from mcp.policy import load_policy, load_state, save_state, is_risky_tool
+from mcp.policy import load_policy, load_state, save_state
 from vcs.snapshot_cache import SnapshotCache
 from patcher.staging import StagingArea
 from indexer.indexer import SymbolIndexer
@@ -35,6 +35,10 @@ CONFIG_PATH = APP_ROOT / "configs" / "config.yaml"
 class InitRequest(BaseModel):
     repo_root: str
     allow_missing_repo: bool = False
+
+class RestoreRemoteRequest(BaseModel):
+    restore_remote_url: str
+    push_on_approve: bool | None = None
 
 class ProposeRequest(BaseModel):
     instruction: str
@@ -178,7 +182,11 @@ def query(req: QueryRequest):
         raise HTTPException(400, "init first")
     _ensure_repo_map()
     planner = QueryPlanner(STATE["session"])
-    result = planner.analyze(req.user_text)
+    result = planner.analyze(
+        req.user_text,
+        repo_root_known=STATE["repo_root"] is not None,
+        has_pending_patch=STATE.get("pending_diff") is not None,
+    )
     plan = result.plan
     if result.state == "READY":
         try:
@@ -191,6 +199,9 @@ def query(req: QueryRequest):
         "plan": plan,
         "use_mcp": result.use_mcp,
         "mcp_server": result.mcp_server,
+        "intent": result.intent,
+        "needs_confirm": result.needs_confirm,
+        "confirm_token": result.confirm_token,
     }
 
 @app.post("/propose")
@@ -363,16 +374,9 @@ def _maybe_use_mcp(confirm: str | None, query: str | None) -> tuple[list[str], d
     meta = {"used": False, "server": None, "error": None}
     if not query:
         return [], meta
-    allow = False
-    if confirm and confirm.strip().upper() == "YES":
-        allow = True
-        STATE["mcp_allowed"] = True
-        save_state(Path(STATE["repo_root"]), {"mcp_allowed": True})
-    elif STATE.get("mcp_allowed", False):
-        allow = True
-    if not allow:
-        meta["error"] = "MCP not allowed (call /mcp/allow with confirm YES)"
-        return [], meta
+    # MCP use is always allowed (no YES gating)
+    STATE["mcp_allowed"] = True
+    save_state(Path(STATE["repo_root"]), {"mcp_allowed": True})
     try:
         server = "playwright"
         client = MCP_REGISTRY.get_client(server)
@@ -631,6 +635,39 @@ def snapshots_restore(req: SnapshotRestoreRequest):
     STATE["pending_risk"] = ""
     return {"status": "ok", "head": STATE["snapshots"].get_head()}
 
+# Compatibility endpoints for legacy clients
+@app.post("/restore_remote")
+def restore_remote(req: RestoreRemoteRequest):
+    return {
+        "status": "ok",
+        "restore_remote_url": "",
+        "disabled": True,
+        "message": "git restore disabled; snapshots are local-only",
+    }
+
+@app.get("/restore_points")
+def restore_points():
+    if STATE.get("snapshots") is None:
+        raise HTTPException(400, "init first")
+    return {"restore_points": [s.get("snapshot_id") for s in STATE["snapshots"].list_snapshots()]}
+
+class RevertRequest(BaseModel):
+    sha: str
+
+@app.post("/revert")
+def revert(req: RevertRequest):
+    if STATE.get("snapshots") is None:
+        raise HTTPException(400, "init first")
+    try:
+        STATE["snapshots"].restore(req.sha)
+    except Exception as exc:
+        raise HTTPException(400, f"snapshot not found: {exc}")
+    STATE["indexer"].index_all()
+    STATE["pending_diff"] = None
+    STATE["pending_summary"] = ""
+    STATE["pending_risk"] = ""
+    return {"status": "ok", "head": STATE["snapshots"].get_head()}
+
 @app.post("/reset_context")
 def reset_context_endpoint():
     if STATE["repo_root"] is None:
@@ -846,8 +883,6 @@ def run_command(req: RunCommandRequest):
 
 @app.post("/mcp/allow")
 def mcp_allow(req: MCPAllowRequest):
-    if req.confirm is None or req.confirm.strip().upper() != "YES":
-        return {"status": "needs_confirmation", "message": "MCP access requires explicit YES confirmation."}
     STATE["mcp_allowed"] = True
     if STATE["repo_root"] is not None:
         save_state(Path(STATE["repo_root"]), {"mcp_allowed": True})
@@ -855,8 +890,6 @@ def mcp_allow(req: MCPAllowRequest):
 
 @app.post("/mcp/revoke")
 def mcp_revoke(req: MCPRevokeRequest):
-    if req.confirm is None or req.confirm.strip().upper() != "YES":
-        return {"status": "needs_confirmation", "message": "MCP revoke requires explicit YES confirmation."}
     STATE["mcp_allowed"] = False
     if STATE["repo_root"] is not None:
         save_state(Path(STATE["repo_root"]), {"mcp_allowed": False})
@@ -876,8 +909,6 @@ def mcp_status():
 def mcp_list_tools(req: MCPListRequest):
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
-    if req.confirm is None or req.confirm.strip().upper() != "YES":
-        return {"status": "needs_confirmation", "message": "Starting MCP server requires YES confirmation."}
     try:
         STATE["mcp_allowed"] = True
         if STATE["repo_root"] is not None:
@@ -892,13 +923,6 @@ def mcp_list_tools(req: MCPListRequest):
 def mcp_call(req: MCPCallRequest):
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
-    if req.confirm is None or req.confirm.strip().upper() != "YES":
-        # If tool is risky, require explicit YES
-        risky, reason = is_risky_tool(req.tool, req.arguments, Path(STATE["repo_root"]), MCP_POLICY)
-        if risky:
-            return {"status": "needs_confirmation", "message": f"Tool call requires YES confirmation: {reason}"}
-        if not STATE.get("mcp_allowed", False):
-            return {"status": "needs_confirmation", "message": "MCP access requires explicit YES confirmation."}
     try:
         STATE["mcp_allowed"] = True
         if STATE["repo_root"] is not None:

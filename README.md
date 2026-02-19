@@ -31,6 +31,7 @@ One-shot local (server + VSCode UI):
   - `GET /snapshots`
   - `POST /snapshots/create`
   - `POST /snapshots/restore`
+- Compatibility: legacy `restore_*` endpoints return snapshot data or a disabled message.
   - Optional `push_on_approve: true|false` toggles automatic push on approval.
 
 Then set VSCode setting:

@@ -11,6 +11,9 @@
 - `POST /mcp/allow` sets mcp_allowed=true
 - `POST /mcp/revoke` sets mcp_allowed=false
 - `GET /mcp/status` returns mcp_allowed + allowed_domains
+- `POST /restore_remote` returns disabled (compat)
+- `GET /restore_points` returns snapshot ids (compat)
+- `POST /revert` restores snapshot by id (compat)
 - `GET /snapshots` returns list
 - `POST /snapshots/create` creates snapshot
 - `POST /snapshots/restore` restores snapshot
