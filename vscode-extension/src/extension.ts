@@ -20,6 +20,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
   private mcpStatusText: string = "";
   private snapshotsText: string = "";
   private ingestStatusText: string = "";
+  private warnedMissingContext: boolean = false;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -73,6 +74,15 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     if (!text || !text.trim()) {
       return;
     }
+    const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get<boolean>("sendContextBundle", false);
+    if (!sendContext && !this.warnedMissingContext) {
+      this.warnedMissingContext = true;
+      this.messages.push({
+        role: "assistant",
+        text: "Heads up: sendContextBundle is disabled. In VM mode the server cannot see your local files, so summaries may be empty. Enable localCodeAgent.sendContextBundle.",
+        timestamp: Date.now(),
+      });
+    }
     const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get<boolean>("useStreaming", false);
     if (useStreaming) {
       await this.handleUserMessageStream(text);
@@ -85,7 +95,6 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     await this.ensureInit();
     this.markProgressDone("Connecting to server…");
     this.pushProgress("Planning request…", "running");
-    const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get<boolean>("sendContextBundle", false);
     const workspaceContext = sendContext ? await gatherWorkspaceContext() : null;
     const res = await this.api.post<{
       state: string;

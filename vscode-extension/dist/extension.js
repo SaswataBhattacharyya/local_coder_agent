@@ -103,6 +103,11 @@ class AgentViewProvider {
         if (!text || !text.trim()) {
             return;
         }
+        const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get("useStreaming", false);
+        if (useStreaming) {
+            await this.handleUserMessageStream(text);
+            return;
+        }
         this.messages.push({ role: "user", text, timestamp: Date.now() });
         this.progress = [];
         this.pushProgress("Connecting to server…", "running");
@@ -110,7 +115,9 @@ class AgentViewProvider {
         await this.ensureInit();
         this.markProgressDone("Connecting to server…");
         this.pushProgress("Planning request…", "running");
-        const res = await this.api.post("/query", { user_text: text });
+        const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
+        const workspaceContext = sendContext ? await (0, context_1.gatherWorkspaceContext)() : null;
+        const res = await this.api.post("/query", { user_text: text, workspace_context: workspaceContext });
         if (!res.ok) {
             this.markProgressError("Planning request…");
             this.messages.push({ role: "assistant", text: `Query failed: ${res.error}`, timestamp: Date.now() });
@@ -139,6 +146,76 @@ class AgentViewProvider {
         this.pushProgress("Plan ready.", "done");
         this.messages.push({ role: "assistant", text: "Response received, but no answer or plan was provided.", timestamp: Date.now() });
         this.refresh();
+    }
+    async handleUserMessageStream(text) {
+        this.messages.push({ role: "user", text, timestamp: Date.now() });
+        this.progress = [];
+        this.pushProgress("Connecting to server…", "running");
+        this.refresh();
+        await this.ensureInit();
+        this.markProgressDone("Connecting to server…");
+        this.pushProgress("Streaming response…", "running");
+        const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
+        const workspaceContext = sendContext ? await (0, context_1.gatherWorkspaceContext)() : null;
+        const res = await this.api.postStream("/query_stream", { user_text: text, workspace_context: workspaceContext });
+        if (!res.ok) {
+            this.markProgressError("Streaming response…");
+            this.messages.push({ role: "assistant", text: `Query failed: ${res.error}`, timestamp: Date.now() });
+            this.refresh();
+            return;
+        }
+        const msgIndex = this.messages.length;
+        this.messages.push({ role: "assistant", text: "", timestamp: Date.now(), streaming: true });
+        this.refresh();
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+        while (true) {
+            const { value, done } = await res.reader.read();
+            if (done)
+                break;
+            buffer += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buffer.indexOf("\n\n")) !== -1) {
+                const raw = buffer.slice(0, idx);
+                buffer = buffer.slice(idx + 2);
+                this.handleSseEvent(raw, msgIndex);
+            }
+        }
+        const current = this.messages[msgIndex];
+        if (current && current.role === "assistant") {
+            current.streaming = false;
+        }
+        this.markProgressDone("Streaming response…");
+        this.refresh();
+    }
+    handleSseEvent(raw, msgIndex) {
+        let eventName = "message";
+        let data = "";
+        for (const line of raw.split("\n")) {
+            if (line.startsWith("event:")) {
+                eventName = line.slice(6).trim();
+            }
+            else if (line.startsWith("data:")) {
+                data += line.slice(5).trimStart() + "\n";
+            }
+        }
+        data = data.replace(/\n$/, "");
+        if (!data) {
+            return;
+        }
+        if (eventName === "answer" || eventName === "plan" || eventName === "questions") {
+            const current = this.messages[msgIndex];
+            if (current && current.role === "assistant") {
+                current.text += data;
+            }
+            this.refresh();
+            return;
+        }
+        if (eventName === "error") {
+            this.messages.push({ role: "assistant", text: data, timestamp: Date.now() });
+            this.refresh();
+            return;
+        }
     }
     async runAction(action, payload = {}) {
         switch (action) {
@@ -209,6 +286,68 @@ class AgentViewProvider {
         if (sendContext) {
             const bundle = await (0, context_1.gatherContext)();
             payload.context = bundle;
+            const workspaceContext = await (0, context_1.gatherWorkspaceContext)();
+            payload.workspace_context = workspaceContext;
+        }
+        const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get("useStreaming", false);
+        if (useStreaming) {
+            const stream = await this.api.postStream("/propose_stream", payload);
+            if (!stream.ok) {
+                this.messages.push({ role: "assistant", text: `Propose failed: ${stream.error}`, timestamp: Date.now() });
+                this.refresh();
+                return;
+            }
+            let diff = "";
+            let summary = "";
+            let risk = "";
+            const msgIndex = this.messages.length;
+            this.messages.push({ role: "assistant", text: "Streaming proposal…\n", timestamp: Date.now(), streaming: true });
+            this.refresh();
+            const decoder = new TextDecoder("utf-8");
+            let buffer = "";
+            while (true) {
+                const { value, done } = await stream.reader.read();
+                if (done)
+                    break;
+                buffer += decoder.decode(value, { stream: true });
+                let idx;
+                while ((idx = buffer.indexOf("\n\n")) !== -1) {
+                    const raw = buffer.slice(0, idx);
+                    buffer = buffer.slice(idx + 2);
+                    let eventName = "message";
+                    let data = "";
+                    for (const line of raw.split("\n")) {
+                        if (line.startsWith("event:")) {
+                            eventName = line.slice(6).trim();
+                        }
+                        else if (line.startsWith("data:")) {
+                            data += line.slice(5).trimStart() + "\n";
+                        }
+                    }
+                    data = data.replace(/\n$/, "");
+                    if (!data)
+                        continue;
+                    if (eventName === "summary")
+                        summary += data;
+                    if (eventName === "risk")
+                        risk += data;
+                    if (eventName === "diff")
+                        diff += data;
+                    const current = this.messages[msgIndex];
+                    if (current && current.role === "assistant") {
+                        current.text = `Summary:\n${summary || "(pending)"}\n\nRisk:\n${risk || "(pending)"}\n\nDiff:\n${diff.slice(0, 4000)}`;
+                    }
+                    this.refresh();
+                }
+            }
+            const current = this.messages[msgIndex];
+            if (current && current.role === "assistant") {
+                current.streaming = false;
+            }
+            this.pending = { diff, summary, riskNotes: risk };
+            this.messages.push({ role: "assistant", text: summary || "Proposal ready", timestamp: Date.now() });
+            this.refresh();
+            return;
         }
         const res = await this.api.post("/propose", payload);
         if (!res.ok) {
@@ -239,6 +378,68 @@ class AgentViewProvider {
         if (sendContext) {
             const bundle = await (0, context_1.gatherContext)();
             payload.context = bundle;
+            const workspaceContext = await (0, context_1.gatherWorkspaceContext)();
+            payload.workspace_context = workspaceContext;
+        }
+        const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get("useStreaming", false);
+        if (useStreaming) {
+            const stream = await this.api.postStream("/revise_pending_stream", payload);
+            if (!stream.ok) {
+                this.messages.push({ role: "assistant", text: `Revise failed: ${stream.error}`, timestamp: Date.now() });
+                this.refresh();
+                return;
+            }
+            let diff = "";
+            let summary = "";
+            let risk = "";
+            const msgIndex = this.messages.length;
+            this.messages.push({ role: "assistant", text: "Streaming revision…\n", timestamp: Date.now(), streaming: true });
+            this.refresh();
+            const decoder = new TextDecoder("utf-8");
+            let buffer = "";
+            while (true) {
+                const { value, done } = await stream.reader.read();
+                if (done)
+                    break;
+                buffer += decoder.decode(value, { stream: true });
+                let idx;
+                while ((idx = buffer.indexOf("\n\n")) !== -1) {
+                    const raw = buffer.slice(0, idx);
+                    buffer = buffer.slice(idx + 2);
+                    let eventName = "message";
+                    let data = "";
+                    for (const line of raw.split("\n")) {
+                        if (line.startsWith("event:")) {
+                            eventName = line.slice(6).trim();
+                        }
+                        else if (line.startsWith("data:")) {
+                            data += line.slice(5).trimStart() + "\n";
+                        }
+                    }
+                    data = data.replace(/\n$/, "");
+                    if (!data)
+                        continue;
+                    if (eventName === "summary")
+                        summary += data;
+                    if (eventName === "risk")
+                        risk += data;
+                    if (eventName === "diff")
+                        diff += data;
+                    const current = this.messages[msgIndex];
+                    if (current && current.role === "assistant") {
+                        current.text = `Summary:\n${summary || "(pending)"}\n\nRisk:\n${risk || "(pending)"}\n\nDiff:\n${diff.slice(0, 4000)}`;
+                    }
+                    this.refresh();
+                }
+            }
+            const current = this.messages[msgIndex];
+            if (current && current.role === "assistant") {
+                current.streaming = false;
+            }
+            this.pending = { diff, summary, riskNotes: risk };
+            this.messages.push({ role: "assistant", text: summary || "Revised pending patch", timestamp: Date.now() });
+            this.refresh();
+            return;
         }
         const res = await this.api.post("/revise_pending", payload);
         if (!res.ok) {
@@ -261,6 +462,57 @@ class AgentViewProvider {
             return;
         }
         const diffToApply = diffOverride || this.pending.diff;
+        const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get("useStreaming", false);
+        if (useStreaming) {
+            const stream = await this.api.postStream("/approve_stream", { unified_diff: diffToApply });
+            if (!stream.ok) {
+                this.messages.push({ role: "assistant", text: `Approve failed: ${stream.error}`, timestamp: Date.now() });
+                this.refresh();
+                return;
+            }
+            const msgIndex = this.messages.length;
+            this.messages.push({ role: "assistant", text: "Approving…\n", timestamp: Date.now(), streaming: true });
+            this.refresh();
+            const decoder = new TextDecoder("utf-8");
+            let buffer = "";
+            while (true) {
+                const { value, done } = await stream.reader.read();
+                if (done)
+                    break;
+                buffer += decoder.decode(value, { stream: true });
+                let idx;
+                while ((idx = buffer.indexOf("\n\n")) !== -1) {
+                    const raw = buffer.slice(0, idx);
+                    buffer = buffer.slice(idx + 2);
+                    let eventName = "message";
+                    let data = "";
+                    for (const line of raw.split("\n")) {
+                        if (line.startsWith("event:")) {
+                            eventName = line.slice(6).trim();
+                        }
+                        else if (line.startsWith("data:")) {
+                            data += line.slice(5).trimStart() + "\n";
+                        }
+                    }
+                    data = data.replace(/\n$/, "");
+                    if (!data)
+                        continue;
+                    const current = this.messages[msgIndex];
+                    if (current && current.role === "assistant") {
+                        current.text += `${data}\n`;
+                    }
+                    this.refresh();
+                }
+            }
+            const current = this.messages[msgIndex];
+            if (current && current.role === "assistant") {
+                current.streaming = false;
+            }
+            this.pending = null;
+            await this.api.post("/reset_context", {});
+            this.refresh();
+            return;
+        }
         // Prefer server-side approve (works for VM + local)
         const serverRes = await this.api.post("/approve", { unified_diff: diffToApply });
         if (serverRes.ok) {

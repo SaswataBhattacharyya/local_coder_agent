@@ -101,7 +101,7 @@
         },
         "localCodeAgent.sendContextBundle": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Send minimal context bundle with query/propose/revise requests."
         },
         "localCodeAgent.useStreaming": {
