@@ -34,7 +34,15 @@ export class ApiClient {
       });
       clearTimeout(timeout);
       const text = await res.text();
-      const json = text ? JSON.parse(text) : {};
+      let json: any = {};
+      try {
+        json = text ? JSON.parse(text) : {};
+      } catch (err: any) {
+        const msg = err?.message || "Invalid JSON";
+        this.log?.(`POST ${path} status ${res.status}: JSON parse error: ${msg}. Body (trunc): ${text.slice(0, 800)}`);
+        return { ok: false, error: `Invalid JSON response: ${msg}` };
+      }
+      this.log?.(`POST ${path} status ${res.status}. Body (trunc): ${text.slice(0, 800)}`);
       if (!res.ok) {
         return { ok: false, error: json.detail || res.statusText };
       }
@@ -57,7 +65,15 @@ export class ApiClient {
       });
       clearTimeout(timeout);
       const text = await res.text();
-      const json = text ? JSON.parse(text) : {};
+      let json: any = {};
+      try {
+        json = text ? JSON.parse(text) : {};
+      } catch (err: any) {
+        const msg = err?.message || "Invalid JSON";
+        this.log?.(`GET ${path} status ${res.status}: JSON parse error: ${msg}. Body (trunc): ${text.slice(0, 800)}`);
+        return { ok: false, error: `Invalid JSON response: ${msg}` };
+      }
+      this.log?.(`GET ${path} status ${res.status}. Body (trunc): ${text.slice(0, 800)}`);
       if (!res.ok) {
         return { ok: false, error: json.detail || res.statusText };
       }

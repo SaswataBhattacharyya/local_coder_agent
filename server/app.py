@@ -1,5 +1,5 @@
 from __future__ import annotations
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
 from pathlib import Path
 import os
@@ -9,6 +9,45 @@ import uuid
 import json
 import time
 import sqlite3
+
+class TraceSpan:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.start = time.perf_counter()
+        self.end = None
+
+    def finish(self) -> None:
+        self.end = time.perf_counter()
+
+    def ms(self) -> float:
+        if self.end is None:
+            return 0.0
+        return (self.end - self.start) * 1000.0
+
+
+class TraceContext:
+    def __init__(self) -> None:
+        self.id = uuid.uuid4().hex[:12]
+        self.spans: list[TraceSpan] = []
+
+    def span(self, name: str) -> TraceSpan:
+        s = TraceSpan(name)
+        self.spans.append(s)
+        return s
+
+    def to_dict(self) -> dict:
+        return {
+            "trace_id": self.id,
+            "spans": [
+                {"name": s.name, "ms": round(s.ms(), 2)}
+                for s in self.spans
+                if s.end is not None
+            ],
+        }
+
+    def log(self, prefix: str) -> None:
+        parts = [f"{s.name}={s.ms():.2f}ms" for s in self.spans if s.end is not None]
+        print(f"[trace {self.id}] {prefix}: " + ", ".join(parts))
 
 from agent.config import load_config
 from agent.planner import QueryPlanner
@@ -178,36 +217,50 @@ def init(req: InitRequest):
     return {"status":"ok", "repo_root": str(repo), "snapshots": snapshots.list_snapshots()}
 
 @app.post("/query")
-def query(req: QueryRequest):
+def query(req: QueryRequest, response: Response):
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
+    trace = TraceContext()
     planner = QueryPlanner(STATE["session"])
+    span = trace.span("intent_router")
     result = planner.analyze(
         req.user_text,
         repo_root_known=STATE["repo_root"] is not None,
         has_pending_patch=STATE.get("pending_diff") is not None,
     )
+    span.finish()
     if result.intent in ("EDIT", "COMMAND"):
+        span = trace.span("repomap_refresh")
         _ensure_repo_map()
+        span.finish()
     plan = result.plan
     if result.state == "READY" and result.intent not in ("INFO",):
         try:
+            span = trace.span("llm_plan")
             plan = _generate_plan_llm(req.user_text)
+            span.finish()
         except Exception:
             plan = result.plan
     answer = None
     if result.state == "READY" and result.intent == "INFO":
         try:
+            span = trace.span("repomap_refresh")
             _ensure_repo_map()
+            span.finish()
+            span = trace.span("info_pipeline")
             info = generate_info_answer(Path(STATE["repo_root"]))
             answer = info.render()
+            span.finish()
         except Exception as exc:
             answer = f"Unable to generate summary: {exc}"
+    response.headers["X-Trace-Id"] = trace.id
+    trace.log("query")
     return {
         "state": result.state,
         "questions": result.questions,
         "plan": plan,
         "answer": answer,
+        "trace": trace.to_dict(),
         "use_mcp": result.use_mcp,
         "mcp_server": result.mcp_server,
         "intent": result.intent,
@@ -216,19 +269,28 @@ def query(req: QueryRequest):
     }
 
 @app.post("/propose")
-def propose(req: ProposeRequest):
+def propose(req: ProposeRequest, response: Response):
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
+    trace = TraceContext()
+    span = trace.span("repomap_refresh")
     _ensure_repo_map()
+    span.finish()
     external_context = _context_bundle_to_text(req.context)
     mcp_query = req.mcp_query
     if not mcp_query and _should_use_mcp(req.instruction):
         mcp_query = req.instruction
+    span = trace.span("mcp")
     mcp_context, mcp_meta = _maybe_use_mcp(req.mcp_confirm, mcp_query)
+    span.finish()
     external_context.extend(mcp_context)
+    span = trace.span("context_ingest")
     external_context, ingest_meta = _maybe_ingest_context(req.instruction, external_context)
+    span.finish()
     try:
+        span = trace.span("llm_propose")
         proposal = propose_patch(req.instruction, STATE["indexer"], CONFIG, external_context=external_context)
+        span.finish()
     except Exception as exc:
         raise HTTPException(400, f"propose failed: {exc}")
     STATE["pending_diff"] = proposal.diff
@@ -241,6 +303,8 @@ def propose(req: ProposeRequest):
             "risk": proposal.risk_notes,
         })
     touched = _touched_files(proposal.diff)
+    response.headers["X-Trace-Id"] = trace.id
+    trace.log("propose")
     return {
         "status":"ok",
         "diff": proposal.diff,
@@ -249,6 +313,7 @@ def propose(req: ProposeRequest):
         "risk_notes": proposal.risk_notes,
         "mcp": mcp_meta,
         "ingest": ingest_meta,
+        "trace": trace.to_dict(),
     }
 
 @app.get("/pending")
