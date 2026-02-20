@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { ContextBundle } from "./types";
+import { ContextBundle, WorkspaceContextBundle } from "./types";
 
 export async function gatherContext(): Promise<ContextBundle> {
   const bundle: ContextBundle = { files: [], snippets: [] };
@@ -46,4 +46,97 @@ export async function gatherContext(): Promise<ContextBundle> {
   }
 
   return bundle;
+}
+
+const MAX_FILE_CHARS = 12000;
+const MAX_TREE_ENTRIES = 200;
+
+export async function gatherWorkspaceContext(): Promise<WorkspaceContextBundle | null> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+  if (!root) {
+    return null;
+  }
+  const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name || "workspace";
+  const tree: { name: string; type: "file" | "dir" }[] = [];
+  try {
+    const entries = await vscode.workspace.fs.readDirectory(root);
+    for (const [name, type] of entries.slice(0, MAX_TREE_ENTRIES)) {
+      tree.push({ name, type: type === vscode.FileType.Directory ? "dir" : "file" });
+    }
+  } catch {
+    // ignore tree errors
+  }
+
+  const files: { path: string; content: string }[] = [];
+  const toRead: vscode.Uri[] = [];
+  const rootPath = root.fsPath;
+
+  // README*
+  try {
+    const entries = await vscode.workspace.fs.readDirectory(root);
+    for (const [name, type] of entries) {
+      if (type !== vscode.FileType.File) continue;
+      if (/^README(\\.[A-Za-z0-9]+)?$/i.test(name)) {
+        toRead.push(vscode.Uri.joinPath(root, name));
+        break;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const fixedFiles = [
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "Makefile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    ".env.example",
+  ];
+  for (const name of fixedFiles) {
+    toRead.push(vscode.Uri.joinPath(root, name));
+  }
+
+  const configGlobs = ["vite.config.", "next.config."];
+  try {
+    const entries = await vscode.workspace.fs.readDirectory(root);
+    for (const [name, type] of entries) {
+      if (type !== vscode.FileType.File) continue;
+      if (configGlobs.some((p) => name.startsWith(p))) {
+        toRead.push(vscode.Uri.joinPath(root, name));
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const scripts: Record<string, string> = {};
+  for (const uri of toRead) {
+    try {
+      const data = await vscode.workspace.fs.readFile(uri);
+      const text = new TextDecoder("utf-8").decode(data).slice(0, MAX_FILE_CHARS);
+      files.push({ path: uri.fsPath, content: text });
+      if (uri.path.endsWith("package.json")) {
+        try {
+          const pkg = JSON.parse(text);
+          if (pkg && typeof pkg.scripts === "object") {
+            Object.assign(scripts, pkg.scripts);
+          }
+        } catch {
+          // ignore JSON parse errors
+        }
+      }
+    } catch {
+      // ignore missing files
+    }
+  }
+
+  return {
+    workspaceName,
+    rootPath,
+    tree,
+    files,
+    packageScripts: Object.keys(scripts).length ? scripts : undefined,
+  };
 }

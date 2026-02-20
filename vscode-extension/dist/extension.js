@@ -118,15 +118,27 @@ class AgentViewProvider {
             return;
         }
         this.markProgressDone("Planning request…");
+        if (res.data.answer) {
+            this.pushProgress("Answer ready.", "done");
+            this.messages.push({ role: "assistant", text: res.data.answer, timestamp: Date.now() });
+            this.refresh();
+            return;
+        }
         if (res.data.questions && res.data.questions.length > 0) {
             this.pushProgress("Need clarification before proceeding.", "done");
             this.messages.push({ role: "assistant", text: res.data.questions.join("\n"), timestamp: Date.now() });
             this.refresh();
+            return;
         }
-        if (!res.data.questions || res.data.questions.length === 0) {
+        if (res.data.plan && res.data.plan.length > 0) {
             this.pushProgress("Plan ready.", "done");
+            this.messages.push({ role: "assistant", text: res.data.plan.map((p) => `- ${p}`).join("\n"), timestamp: Date.now() });
             this.refresh();
+            return;
         }
+        this.pushProgress("Plan ready.", "done");
+        this.messages.push({ role: "assistant", text: "Response received, but no answer or plan was provided.", timestamp: Date.now() });
+        this.refresh();
     }
     async runAction(action, payload = {}) {
         switch (action) {

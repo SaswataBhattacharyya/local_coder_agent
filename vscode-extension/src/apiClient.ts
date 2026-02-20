@@ -54,6 +54,34 @@ export class ApiClient {
     }
   }
 
+  async postStream(
+    path: string,
+    body: any
+  ): Promise<{ ok: true; reader: ReadableStreamDefaultReader<Uint8Array> } | { ok: false; error: string }> {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120000);
+      const res = await fetch(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!res.ok || !res.body) {
+        const text = await res.text();
+        this.log?.(`POST ${path} status ${res.status}. Body (trunc): ${text.slice(0, 800)}`);
+        return { ok: false, error: text || res.statusText };
+      }
+      this.log?.(`POST ${path} status ${res.status} (streaming).`);
+      return { ok: true, reader: res.body.getReader() };
+    } catch (err: any) {
+      const msg = err?.message || "Request failed";
+      this.log?.(`POST ${path} failed: ${msg}`);
+      return { ok: false, error: `${msg} (server: ${this.baseUrl})` };
+    }
+  }
+
   async get<T>(path: string): Promise<ApiResponse<T>> {
     try {
       const controller = new AbortController();

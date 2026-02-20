@@ -1,5 +1,6 @@
 from __future__ import annotations
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from pathlib import Path
 import os
@@ -51,7 +52,7 @@ class TraceContext:
 
 from agent.config import load_config
 from agent.planner import QueryPlanner
-from agent.info_pipeline import generate_info_answer
+from agent.info_pipeline import generate_info_answer, generate_info_answer_from_context
 from agent.state import AgentSession, AgentState
 from agent.pipeline import propose_patch, revise_pending_patch
 from agent.llm_router import chat as llm_chat
@@ -85,15 +86,18 @@ class ProposeRequest(BaseModel):
     mcp_confirm: str | None = None
     mcp_query: str | None = None
     context: dict | None = None
+    workspace_context: dict | None = None
 
 class QueryRequest(BaseModel):
     user_text: str
+    workspace_context: dict | None = None
 
 class ReviseRequest(BaseModel):
     instruction: str
     mcp_confirm: str | None = None
     mcp_query: str | None = None
     context: dict | None = None
+    workspace_context: dict | None = None
 
 class PatchRequest(BaseModel):
     unified_diff: str
@@ -170,6 +174,151 @@ STATE = {
     "task_worker": None,
 }
 
+
+def _sse_event(event: str, data: str) -> str:
+    data = data.replace("\r", "")
+    lines = data.split("\n")
+    payload = "".join([f"data: {line}\n" for line in lines])
+    return f"event: {event}\n{payload}\n"
+
+
+def _stream_text(event: str, text: str, chunk: int = 800):
+    for i in range(0, len(text), chunk):
+        yield _sse_event(event, text[i:i + chunk])
+
+
+def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
+    planner = QueryPlanner(STATE["session"])
+    span = trace.span("intent_router")
+    result = planner.analyze(
+        req.user_text,
+        repo_root_known=STATE["repo_root"] is not None,
+        has_pending_patch=STATE.get("pending_diff") is not None,
+    )
+    span.finish()
+    if result.intent in ("EDIT", "COMMAND"):
+        span = trace.span("repomap_refresh")
+        _ensure_repo_map()
+        span.finish()
+    plan = result.plan
+    if result.state == "READY" and result.intent not in ("INFO",):
+        try:
+            span = trace.span("llm_plan")
+            plan = _generate_plan_llm(req.user_text)
+            span.finish()
+        except Exception:
+            plan = result.plan
+    answer = None
+    if result.state == "READY" and result.intent == "INFO":
+        try:
+            workspace_ctx = req.workspace_context
+            if workspace_ctx:
+                span = trace.span("info_pipeline")
+                info = generate_info_answer_from_context(workspace_ctx)
+                answer = info.render()
+                span.finish()
+            else:
+                repo_root = str(STATE["repo_root"])
+                if ".agent_stateless" in repo_root:
+                    answer = (
+                        "No workspace context received. The server cannot access your local VS Code files. "
+                        "Enable 'sendContextBundle' or init with a real repo_root inside the VM."
+                    )
+                else:
+                    span = trace.span("repomap_refresh")
+                    _ensure_repo_map()
+                    span.finish()
+                    span = trace.span("info_pipeline")
+                    info = generate_info_answer(Path(STATE["repo_root"]))
+                    answer = info.render()
+                    span.finish()
+        except Exception as exc:
+            answer = f"Unable to generate summary: {exc}"
+    return {
+        "state": result.state,
+        "questions": result.questions,
+        "plan": plan,
+        "answer": answer,
+        "trace": trace.to_dict(),
+        "use_mcp": result.use_mcp,
+        "mcp_server": result.mcp_server,
+        "intent": result.intent,
+        "needs_confirm": result.needs_confirm,
+        "confirm_token": result.confirm_token,
+    }
+
+
+def _context_to_text(ctx: dict) -> str:
+    parts: list[str] = []
+    ws = ctx.get("workspaceName")
+    if ws:
+        parts.append(f"Workspace: {ws}")
+    tree = ctx.get("tree") or []
+    if tree:
+        names = [t.get("name") for t in tree if isinstance(t, dict) and t.get("name")]
+        parts.append("Top-level: " + ", ".join(names[:50]))
+    files = ctx.get("files") or []
+    for f in files:
+        path = f.get("path") or "unknown"
+        content = (f.get("content") or "")[:6000]
+        parts.append(f"File: {Path(path).name}\n{content}")
+    scripts = ctx.get("packageScripts") or {}
+    if scripts:
+        parts.append("package.json scripts:\n" + "\n".join([f"{k}: {v}" for k, v in scripts.items()]))
+    return "\n\n".join(parts)
+
+
+def _llm_info_answer_with_continuation(ctx: dict, max_parts: int = 3) -> list[str]:
+    context_text = _context_to_text(ctx)
+    base_prompt = (
+        "You are summarizing a codebase from partial context. "
+        "Write a crisp but descriptive answer with these sections:\n"
+        "1) Project Summary\n"
+        "2) How to Start (2-3 likely commands)\n"
+        "3) Prerequisites/Notes\n"
+        "4) Ports (if found)\n\n"
+        "If you are not finished, end with <CONTINUE>. If complete, end with <END>.\n\n"
+        f"Context:\n{context_text}"
+    )
+    parts: list[str] = []
+    raw = llm_chat("reasoner", [
+        {"role": "system", "content": "You are a software project summarizer."},
+        {"role": "user", "content": base_prompt},
+    ], CONFIG, Path(STATE["repo_root"]), CONFIG_PATH)
+    parts.append(raw)
+    while len(parts) < max_parts and "<CONTINUE>" in raw and "<END>" not in raw:
+        raw = llm_chat("reasoner", [
+            {"role": "system", "content": "Continue the previous summary. Do not repeat. End with <CONTINUE> or <END>."},
+            {"role": "assistant", "content": "\n".join(parts)},
+            {"role": "user", "content": "Continue."},
+        ], CONFIG, Path(STATE["repo_root"]), CONFIG_PATH)
+        parts.append(raw)
+    return parts
+
+
+def _llm_continue_text(parts: list[str], max_parts: int = 3) -> list[str]:
+    out = list(parts)
+    last = parts[-1] if parts else ""
+    while len(out) < max_parts and "<CONTINUE>" in last and "<END>" not in last:
+        last = llm_chat("reasoner", [
+            {"role": "system", "content": "Continue the previous response. Do not repeat. End with <CONTINUE> or <END>."},
+            {"role": "assistant", "content": "\n".join(out)},
+            {"role": "user", "content": "Continue."},
+        ], CONFIG, Path(STATE["repo_root"]), CONFIG_PATH)
+        out.append(last)
+    return out
+
+
+def _needs_continuation(text: str, max_stream: int) -> bool:
+    if len(text) >= max_stream:
+        return True
+    tail = text.strip()
+    if not tail:
+        return False
+    return not tail.endswith((".", "!", "?", "`", ")"))
+
 @app.post("/init")
 def init(req: InitRequest):
     repo = Path(req.repo_root).resolve()
@@ -218,55 +367,51 @@ def init(req: InitRequest):
 
 @app.post("/query")
 def query(req: QueryRequest, response: Response):
-    if STATE["repo_root"] is None:
-        raise HTTPException(400, "init first")
     trace = TraceContext()
-    planner = QueryPlanner(STATE["session"])
-    span = trace.span("intent_router")
-    result = planner.analyze(
-        req.user_text,
-        repo_root_known=STATE["repo_root"] is not None,
-        has_pending_patch=STATE.get("pending_diff") is not None,
-    )
-    span.finish()
-    if result.intent in ("EDIT", "COMMAND"):
-        span = trace.span("repomap_refresh")
-        _ensure_repo_map()
-        span.finish()
-    plan = result.plan
-    if result.state == "READY" and result.intent not in ("INFO",):
-        try:
-            span = trace.span("llm_plan")
-            plan = _generate_plan_llm(req.user_text)
-            span.finish()
-        except Exception:
-            plan = result.plan
-    answer = None
-    if result.state == "READY" and result.intent == "INFO":
-        try:
-            span = trace.span("repomap_refresh")
-            _ensure_repo_map()
-            span.finish()
-            span = trace.span("info_pipeline")
-            info = generate_info_answer(Path(STATE["repo_root"]))
-            answer = info.render()
-            span.finish()
-        except Exception as exc:
-            answer = f"Unable to generate summary: {exc}"
+    result = _handle_query(req, trace)
     response.headers["X-Trace-Id"] = trace.id
     trace.log("query")
-    return {
-        "state": result.state,
-        "questions": result.questions,
-        "plan": plan,
-        "answer": answer,
-        "trace": trace.to_dict(),
-        "use_mcp": result.use_mcp,
-        "mcp_server": result.mcp_server,
-        "intent": result.intent,
-        "needs_confirm": result.needs_confirm,
-        "confirm_token": result.confirm_token,
-    }
+    return result
+
+
+@app.post("/query_stream")
+def query_stream(req: QueryRequest):
+    trace = TraceContext()
+    result = _handle_query(req, trace)
+    max_stream = 4000
+
+    def gen():
+        yield _sse_event("status", "started")
+        if result.get("intent") == "INFO" and req.workspace_context and (
+            not result.get("answer") or len(result.get("answer") or "") > max_stream
+        ):
+            span = trace.span("llm_info_stream")
+            parts = _llm_info_answer_with_continuation(req.workspace_context, max_parts=3)
+            span.finish()
+            for part in parts:
+                clean = part.replace("<CONTINUE>", "").replace("<END>", "")
+                yield from _stream_text("answer", clean)
+        elif result.get("answer"):
+            text = result["answer"]
+            if "<CONTINUE>" in text or "<END>" in text or _needs_continuation(text, max_stream):
+                parts = _llm_continue_text([text], max_parts=3)
+                for part in parts:
+                    clean = part.replace("<CONTINUE>", "").replace("<END>", "")
+                    yield from _stream_text("answer", clean)
+            else:
+                yield from _stream_text("answer", text)
+        elif result.get("questions"):
+            yield from _stream_text("questions", "\n".join(result["questions"]))
+        elif result.get("plan"):
+            yield from _stream_text("plan", "\n".join(f"- {p}" for p in result["plan"]))
+        else:
+            yield _sse_event("error", "No answer or plan was produced.")
+        yield _sse_event("done", json.dumps(result.get("trace", {})))
+
+    response = StreamingResponse(gen(), media_type="text/event-stream")
+    response.headers["X-Trace-Id"] = trace.id
+    trace.log("query_stream")
+    return response
 
 @app.post("/propose")
 def propose(req: ProposeRequest, response: Response):
@@ -316,6 +461,62 @@ def propose(req: ProposeRequest, response: Response):
         "trace": trace.to_dict(),
     }
 
+
+@app.post("/propose_stream")
+def propose_stream(req: ProposeRequest):
+    trace = TraceContext()
+    span = trace.span("repomap_refresh")
+    _ensure_repo_map()
+    span.finish()
+    external_context = _context_bundle_to_text(req.context)
+    mcp_query = req.mcp_query
+    if not mcp_query and _should_use_mcp(req.instruction):
+        mcp_query = req.instruction
+    span = trace.span("mcp")
+    mcp_context, mcp_meta = _maybe_use_mcp(req.mcp_confirm, mcp_query)
+    span.finish()
+    external_context.extend(mcp_context)
+    span = trace.span("context_ingest")
+    external_context, ingest_meta = _maybe_ingest_context(req.instruction, external_context)
+    span.finish()
+    try:
+        span = trace.span("llm_propose")
+        proposal = propose_patch(req.instruction, STATE["indexer"], CONFIG, external_context=external_context)
+        span.finish()
+    except Exception as exc:
+        raise HTTPException(400, f"propose failed: {exc}")
+    STATE["pending_diff"] = proposal.diff
+    STATE["pending_summary"] = proposal.summary
+    STATE["pending_risk"] = proposal.risk_notes
+    if STATE.get("state_store"):
+        STATE["state_store"].write_pending_patch({
+            "diff": proposal.diff,
+            "summary": proposal.summary,
+            "risk": proposal.risk_notes,
+        })
+    touched = _touched_files(proposal.diff)
+
+    def gen():
+        yield _sse_event("status", "started")
+        if proposal.summary:
+            yield _sse_event("summary", proposal.summary)
+        if proposal.risk_notes:
+            yield _sse_event("risk", proposal.risk_notes)
+        for i in range(0, len(proposal.diff), 800):
+            yield _sse_event("diff", proposal.diff[i:i + 800])
+        yield _sse_event("meta", json.dumps({
+            "touched_files": touched,
+            "mcp": mcp_meta,
+            "ingest": ingest_meta,
+            "trace": trace.to_dict(),
+        }))
+        yield _sse_event("done", "")
+
+    response = StreamingResponse(gen(), media_type="text/event-stream")
+    response.headers["X-Trace-Id"] = trace.id
+    trace.log("propose_stream")
+    return response
+
 @app.get("/pending")
 def pending():
     return {
@@ -360,6 +561,63 @@ def revise_pending(req: ReviseRequest):
         "mcp": mcp_meta,
         "ingest": ingest_meta,
     }
+
+
+@app.post("/revise_pending_stream")
+def revise_pending_stream(req: ReviseRequest):
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
+    if not STATE["pending_diff"]:
+        raise HTTPException(400, "no pending diff")
+    trace = TraceContext()
+    external_context = _context_bundle_to_text(req.context)
+    mcp_query = req.mcp_query
+    if not mcp_query and _should_use_mcp(req.instruction):
+        mcp_query = req.instruction
+    span = trace.span("mcp")
+    mcp_context, mcp_meta = _maybe_use_mcp(req.mcp_confirm, mcp_query)
+    span.finish()
+    external_context.extend(mcp_context)
+    span = trace.span("context_ingest")
+    external_context, ingest_meta = _maybe_ingest_context(req.instruction, external_context)
+    span.finish()
+    try:
+        span = trace.span("llm_revise")
+        proposal = revise_pending_patch(req.instruction, STATE["pending_diff"], STATE["indexer"], CONFIG, external_context=external_context)
+        span.finish()
+    except Exception as exc:
+        raise HTTPException(400, f"revise failed: {exc}")
+    STATE["pending_diff"] = proposal.diff
+    STATE["pending_summary"] = proposal.summary
+    STATE["pending_risk"] = proposal.risk_notes
+    if STATE.get("state_store"):
+        STATE["state_store"].write_pending_patch({
+            "diff": proposal.diff,
+            "summary": proposal.summary,
+            "risk": proposal.risk_notes,
+        })
+    touched = _touched_files(proposal.diff)
+
+    def gen():
+        yield _sse_event("status", "started")
+        if proposal.summary:
+            yield _sse_event("summary", proposal.summary)
+        if proposal.risk_notes:
+            yield _sse_event("risk", proposal.risk_notes)
+        for i in range(0, len(proposal.diff), 800):
+            yield _sse_event("diff", proposal.diff[i:i + 800])
+        yield _sse_event("meta", json.dumps({
+            "touched_files": touched,
+            "mcp": mcp_meta,
+            "ingest": ingest_meta,
+            "trace": trace.to_dict(),
+        }))
+        yield _sse_event("done", "")
+
+    response = StreamingResponse(gen(), media_type="text/event-stream")
+    response.headers["X-Trace-Id"] = trace.id
+    trace.log("revise_pending_stream")
+    return response
 
 @app.post("/apply_to_staging")
 def apply_to_staging(req: PatchRequest):
@@ -630,22 +888,22 @@ def _handle_task(task: dict) -> dict:
     return {"ok": False, "error": f"unknown task type: {t}"}
 
 @app.post("/approve")
-def approve(req: ApproveRequest):
+def _apply_approve(unified_diff: str, message: str | None) -> dict:
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
     if STATE["pending_diff"] is None:
         raise HTTPException(400, "no pending diff")
-    if req.unified_diff != STATE["pending_diff"]:
+    if unified_diff != STATE["pending_diff"]:
         raise HTTPException(400, "approved diff does not match pending diff")
     try:
-        STATE["staging"].check_unified_diff(req.unified_diff)
+        STATE["staging"].check_unified_diff(unified_diff)
     except Exception as exc:
         raise HTTPException(400, str(exc))
     try:
-        STATE["staging"].apply_unified_diff_to_repo(req.unified_diff)
+        STATE["staging"].apply_unified_diff_to_repo(unified_diff)
     except Exception as exc:
         raise HTTPException(400, str(exc))
-    message = req.message or "Approved change"
+    message = message or "Approved change"
     # Re-index (MVP full re-index; later incremental)
     STATE["indexer"].index_all()
     # Clear pending context + reset RLM vars
@@ -671,6 +929,77 @@ def approve(req: ApproveRequest):
         "snapshot": snap_meta.__dict__,
         "snapshots": STATE["snapshots"].list_snapshots(),
     }
+
+
+@app.post("/approve")
+def approve(req: ApproveRequest):
+    return _apply_approve(req.unified_diff, req.message)
+
+
+@app.post("/approve_stream")
+def approve_stream(req: ApproveRequest):
+    trace = TraceContext()
+
+    def gen():
+        try:
+            yield _sse_event("status", "validating diff")
+            if STATE["repo_root"] is None:
+                yield _sse_event("error", "init first")
+                return
+            if STATE["pending_diff"] is None:
+                yield _sse_event("error", "no pending diff")
+                return
+            if req.unified_diff != STATE["pending_diff"]:
+                yield _sse_event("error", "approved diff does not match pending diff")
+                return
+            yield _sse_event("status", "checking diff")
+            span = trace.span("check_diff")
+            STATE["staging"].check_unified_diff(req.unified_diff)
+            span.finish()
+            yield _sse_event("status", "applying patch")
+            span = trace.span("apply_patch")
+            STATE["staging"].apply_unified_diff_to_repo(req.unified_diff)
+            span.finish()
+            yield _sse_event("status", "reindexing")
+            span = trace.span("reindex")
+            STATE["indexer"].index_all()
+            span.finish()
+            yield _sse_event("status", "snapshotting")
+            span = trace.span("snapshot")
+            message = req.message or "Approved change"
+            if STATE.get("state_store"):
+                STATE["state_store"].clear_pending_patch()
+                try:
+                    STATE["state_store"].snapshot(STATE["snapshots"].get_head(), message="approved")
+                except Exception:
+                    pass
+            snap_meta = STATE["snapshots"].snapshot(message=message)
+            span.finish()
+            yield _sse_event("status", "resetting context")
+            span = trace.span("reset_context")
+            minimal = build_minimal_meta(
+                repo_root=Path(STATE["repo_root"]),
+                head=STATE["snapshots"].get_head(),
+                model_cfg={"reasoner": CONFIG.reasoner.__dict__, "coder": CONFIG.coder.__dict__, "vlm": CONFIG.vlm.__dict__},
+                index_path=STATE["indexer"].db_path,
+            )
+            reset_context(Path(STATE["repo_root"]), minimal)
+            span.finish()
+            STATE["pending_diff"] = None
+            STATE["pending_summary"] = ""
+            STATE["pending_risk"] = ""
+            yield _sse_event("status", "done")
+            yield _sse_event("meta", json.dumps({"snapshot": snap_meta.__dict__}))
+            yield _sse_event("done", json.dumps(trace.to_dict()))
+        except HTTPException as exc:
+            yield _sse_event("error", str(exc.detail))
+        except Exception as exc:
+            yield _sse_event("error", str(exc))
+
+    response = StreamingResponse(gen(), media_type="text/event-stream")
+    response.headers["X-Trace-Id"] = trace.id
+    trace.log("approve_stream")
+    return response
 
 @app.post("/reject")
 def reject():

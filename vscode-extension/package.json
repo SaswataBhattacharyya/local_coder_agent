@@ -102,7 +102,12 @@
         "localCodeAgent.sendContextBundle": {
           "type": "boolean",
           "default": false,
-          "description": "Send minimal context bundle with propose/revise requests."
+          "description": "Send minimal context bundle with query/propose/revise requests."
+        },
+        "localCodeAgent.useStreaming": {
+          "type": "boolean",
+          "default": false,
+          "description": "Stream answers from the server (SSE/chunked)."
         }
       }
     }

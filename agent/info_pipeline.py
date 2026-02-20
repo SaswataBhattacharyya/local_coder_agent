@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import re
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 
 
 _README_RE = re.compile(r"^README(?:\\.[A-Za-z0-9]+)?$", re.IGNORECASE)
@@ -60,6 +60,19 @@ def generate_info_answer(repo_root: Path) -> InfoAnswer:
     return InfoAnswer(summary=summary, start_commands=start_cmds, notes=notes, ports=ports)
 
 
+def generate_info_answer_from_context(ctx: Dict[str, Any]) -> InfoAnswer:
+    files = ctx.get("files") or []
+    readme_text = _find_context_file(files, "README")
+    pkg_text = _find_context_file(files, "package.json")
+    summary = _summarize_readme(readme_text) if readme_text else _fallback_summary_from_context(ctx)
+    start_cmds = _detect_start_commands_from_context(ctx, readme_text, pkg_text)
+    notes = _detect_notes_from_context(ctx, readme_text, pkg_text)
+    ports = _detect_ports(readme_text, Path("."))
+    ws_name = ctx.get("workspaceName") or "workspace"
+    notes.insert(0, f"Summary based on local workspace: {ws_name}.")
+    return InfoAnswer(summary=summary, start_commands=start_cmds, notes=notes, ports=ports)
+
+
 def _load_readme(repo_root: Path) -> Tuple[Path | None, str | None]:
     for p in sorted(repo_root.iterdir()):
         if p.is_file() and _README_RE.match(p.name):
@@ -109,6 +122,14 @@ def _fallback_summary(repo_root: Path) -> str:
     return "Repository with top-level items: " + ", ".join(items[:10])
 
 
+def _fallback_summary_from_context(ctx: Dict[str, Any]) -> str:
+    tree = ctx.get("tree") or []
+    names = [t.get("name") for t in tree if isinstance(t, dict) and t.get("name")]
+    if not names:
+        return "No repository context received."
+    return "Workspace with top-level items: " + ", ".join(names[:10])
+
+
 def _detect_start_commands(repo_root: Path, readme_text: str | None) -> List[str]:
     cmds: List[str] = []
     readme_cmds = _extract_readme_commands(readme_text)
@@ -121,6 +142,39 @@ def _detect_start_commands(repo_root: Path, readme_text: str | None) -> List[str
     cmds.extend(_python_start_cmds(repo_root))
     cmds.extend(_framework_start_cmds(repo_root))
     # De-dup while preserving order
+    seen = set()
+    out = []
+    for c in cmds:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _detect_start_commands_from_context(ctx: Dict[str, Any], readme_text: str | None, pkg_text: str | None) -> List[str]:
+    cmds: List[str] = []
+    cmds.extend(_extract_readme_commands(readme_text))
+    scripts = ctx.get("packageScripts") or {}
+    if not scripts and pkg_text:
+        try:
+            data = json.loads(pkg_text)
+            scripts = data.get("scripts") or {}
+        except Exception:
+            scripts = {}
+    if isinstance(scripts, dict):
+        for key in ["dev", "start", "serve", "preview"]:
+            if key in scripts:
+                cmds.append(f"npm run {key}")
+    # fallback hints from tree
+    tree = ctx.get("tree") or []
+    names = {t.get("name") for t in tree if isinstance(t, dict)}
+    if "docker-compose.yml" in names or "docker-compose.yaml" in names:
+        cmds.append("docker compose up")
+    if "manage.py" in names:
+        cmds.append("python manage.py runserver")
+    # De-dup
     seen = set()
     out = []
     for c in cmds:
@@ -223,6 +277,37 @@ def _detect_notes(repo_root: Path, readme_text: str | None) -> List[str]:
                 notes.append("README mentions prerequisites/requirements.")
                 break
     return notes
+
+
+def _detect_notes_from_context(ctx: Dict[str, Any], readme_text: str | None, pkg_text: str | None) -> List[str]:
+    notes: List[str] = []
+    tree = ctx.get("tree") or []
+    names = {t.get("name") for t in tree if isinstance(t, dict)}
+    if "requirements.txt" in names or "pyproject.toml" in names:
+        notes.append("Python dependencies detected (requirements.txt/pyproject.toml).")
+    if "package.json" in names or pkg_text:
+        notes.append("Node.js dependencies detected (package.json).")
+    if ".env.example" in names:
+        notes.append("Environment variables may be required (.env.example found).")
+    if readme_text:
+        for ln in readme_text.splitlines():
+            if "Prerequisite" in ln or "Requirements" in ln:
+                notes.append("README mentions prerequisites/requirements.")
+                break
+    return notes
+
+
+def _find_context_file(files: List[Dict[str, str]], name: str) -> str | None:
+    for f in files:
+        path = f.get("path") or ""
+        content = f.get("content") or ""
+        base = Path(path).name
+        if name == "README":
+            if _README_RE.match(base):
+                return content
+        if base == name:
+            return content
+    return None
 
 
 def _extract_readme_commands(readme_text: str | None) -> List[str]:

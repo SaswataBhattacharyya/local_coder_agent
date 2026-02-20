@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { parseUnifiedDiff, buildUnifiedDiff, DiffFile, DiffLine } from "./diff";
 
-type ChatMessage = { role: string; text: string; timestamp: number };
+type ChatMessage = { role: string; text: string; timestamp: number; streaming?: boolean };
 type PendingPatch = { diff: string; summary: string; riskNotes: string };
 
 type AgentState = {
@@ -134,7 +134,10 @@ export const App: React.FC = () => {
           )}
           <div className="chat">
             {state.messages.map((m, idx) => (
-              <div key={idx} className={`msg ${m.role}`}>{m.text}</div>
+              <div key={idx} className={`msg ${m.role}`}>
+                <span>{m.text}</span>
+                {m.streaming && <span className="streaming-dots" />}
+              </div>
             ))}
           </div>
           <textarea id="input" placeholder="Describe your request..." />
