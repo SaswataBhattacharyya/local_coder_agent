@@ -12,6 +12,7 @@ import sqlite3
 
 from agent.config import load_config
 from agent.planner import QueryPlanner
+from agent.info_pipeline import generate_info_answer
 from agent.state import AgentSession, AgentState
 from agent.pipeline import propose_patch, revise_pending_patch
 from agent.llm_router import chat as llm_chat
@@ -194,10 +195,19 @@ def query(req: QueryRequest):
             plan = _generate_plan_llm(req.user_text)
         except Exception:
             plan = result.plan
+    answer = None
+    if result.state == "READY" and result.intent == "INFO":
+        try:
+            _ensure_repo_map()
+            info = generate_info_answer(Path(STATE["repo_root"]))
+            answer = info.render()
+        except Exception as exc:
+            answer = f"Unable to generate summary: {exc}"
     return {
         "state": result.state,
         "questions": result.questions,
         "plan": plan,
+        "answer": answer,
         "use_mcp": result.use_mcp,
         "mcp_server": result.mcp_server,
         "intent": result.intent,

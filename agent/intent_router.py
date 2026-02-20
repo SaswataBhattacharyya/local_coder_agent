@@ -5,6 +5,9 @@ import re
 
 INFO_PATTERNS = [
     r"\bsummarize\b",
+    r"\bsummarise\b",
+    r"\bsummarising\b",
+    r"\bsummarizing\b",
     r"\bsummary\b",
     r"\bwhat is this\b",
     r"\bwhat's this\b",
@@ -15,6 +18,8 @@ INFO_PATTERNS = [
     r"\bhow do i run\b",
     r"\bhow to start\b",
     r"\bhow do i start\b",
+    r"\bhow it starts\b",
+    r"\bhow it start\b",
     r"\bhow to build\b",
     r"\bhow to test\b",
     r"\bsetup\b",

@@ -9,6 +9,13 @@ def test_info_request_ready():
     assert res.questions == []
     assert res.intent == "INFO"
 
+def test_info_request_summarise_variant():
+    planner = QueryPlanner(AgentSession())
+    res = planner.analyze("Summarise this project and how it starts", repo_root_known=True)
+    assert res.state == "READY"
+    assert res.questions == []
+    assert res.intent == "INFO"
+
 
 def test_info_request_needs_repo():
     planner = QueryPlanner(AgentSession())
