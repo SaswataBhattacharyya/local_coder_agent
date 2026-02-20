@@ -10,6 +10,7 @@ import uuid
 import json
 import time
 import sqlite3
+import shutil
 
 class TraceSpan:
     def __init__(self, name: str) -> None:
@@ -55,7 +56,7 @@ from agent.planner import QueryPlanner
 from agent.info_pipeline import generate_info_answer, generate_info_answer_from_context
 from agent.state import AgentSession, AgentState
 from agent.pipeline import propose_patch, revise_pending_patch
-from agent.llm_router import chat as llm_chat
+from agent.llm_router import chat as llm_chat, chat_with_images
 from agent.model_registry import list_models, set_selected
 from agent.context_ingest import ingest_and_store
 from rlm_wrap.store import RLMVarStore
@@ -91,6 +92,7 @@ class ProposeRequest(BaseModel):
 class QueryRequest(BaseModel):
     user_text: str
     workspace_context: dict | None = None
+    images: list[dict] | None = None
 
 class ReviseRequest(BaseModel):
     instruction: str
@@ -110,6 +112,19 @@ class ApproveRequest(BaseModel):
 class ModelSelectRequest(BaseModel):
     role: str
     model_id: str
+
+class ModelAddRequest(BaseModel):
+    role: str
+    model_id: str
+    repo_id: str
+    filename_hint: str | None = None
+    context: int | None = None
+    model_dir: str | None = None
+    download_now: bool | None = None
+
+class ModelRemoveRequest(BaseModel):
+    role: str
+    model_ids: list[str]
 
 class SessionStartRequest(BaseModel):
     repo_root: str
@@ -190,10 +205,34 @@ def _stream_text(event: str, text: str, chunk: int = 800):
 def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
+    images = req.images or []
+    user_text = req.user_text
+    if images:
+        try:
+            span = trace.span("vlm_analyze")
+            analysis = chat_with_images("vlm", [
+                {"role": "system", "content": "You are a vision assistant. Describe the image(s) concisely and accurately."},
+                {"role": "user", "content": user_text},
+            ], images, CONFIG, Path(STATE["repo_root"]), CONFIG_PATH)
+            span.finish()
+            if analysis:
+                refine_prompt = (
+                    "Given the user request and image analysis, rewrite a refined, specific instruction for the planner. "
+                    "Keep it short and concrete, include any critical visual details. Return only the refined instruction."
+                )
+                span = trace.span("refine_prompt")
+                refined = llm_chat("reasoner", [
+                    {"role": "system", "content": "You refine requests for planning."},
+                    {"role": "user", "content": f"User request:\n{user_text}\n\nImage analysis:\n{analysis}\n\n{refine_prompt}"},
+                ], CONFIG, Path(STATE["repo_root"]), CONFIG_PATH)
+                span.finish()
+                user_text = refined.strip() or f"{user_text}\n\n[Image Analysis]\n{analysis}"
+        except Exception as exc:
+            user_text = f"{user_text}\n\n[Image Analysis Error]\n{exc}"
     planner = QueryPlanner(STATE["session"])
     span = trace.span("intent_router")
     result = planner.analyze(
-        req.user_text,
+        user_text,
         repo_root_known=STATE["repo_root"] is not None,
         has_pending_patch=STATE.get("pending_diff") is not None,
     )
@@ -206,7 +245,7 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
     if result.state == "READY" and result.intent not in ("INFO",):
         try:
             span = trace.span("llm_plan")
-            plan = _generate_plan_llm(req.user_text)
+            plan = _generate_plan_llm(user_text)
             span.finish()
         except Exception:
             plan = result.plan
@@ -332,7 +371,7 @@ def init(req: InitRequest):
                 repo.mkdir(parents=True, exist_ok=True)
         else:
             raise HTTPException(400, f"repo_root not found: {repo}")
-    snapshots = SnapshotCache(repo_root=repo, max_snapshots=3)
+    snapshots = SnapshotCache(repo_root=repo, max_snapshots=4)
     staging = StagingArea(repo_root=repo, staging_root=repo / ".agent" / "staging")
     indexer = SymbolIndexer(repo_root=repo, db_path=repo / ".agent" / "index.sqlite")
     dep_graph = DependencyGraph(repo_root=repo, db_path=repo / ".agent" / "deps.sqlite")
@@ -1224,16 +1263,90 @@ def get_models():
     return {
         "reasoner": list_models("reasoner", CONFIG, repo_root, CONFIG_PATH),
         "coder": list_models("coder", CONFIG, repo_root, CONFIG_PATH),
+        "vlm": list_models("vlm", CONFIG, repo_root, CONFIG_PATH),
     }
 
 @app.post("/models/select")
 def select_model(req: ModelSelectRequest):
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
-    if req.role not in ("reasoner", "coder"):
-        raise HTTPException(400, "role must be reasoner or coder")
+    if req.role not in ("reasoner", "coder", "vlm"):
+        raise HTTPException(400, "role must be reasoner, coder, or vlm")
     set_selected(req.role, req.model_id, Path(STATE["repo_root"]), CONFIG_PATH)
     return {"status": "ok"}
+
+@app.post("/models/add")
+def add_model(req: ModelAddRequest):
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
+    if req.role not in ("reasoner", "coder", "vlm"):
+        raise HTTPException(400, "role must be reasoner, coder, or vlm")
+    # Validate repo has GGUFs
+    try:
+        from huggingface_hub import list_repo_files  # type: ignore
+        files = list_repo_files(req.repo_id)
+        ggufs = [f for f in files if f.lower().endswith(".gguf")]
+        if not ggufs:
+            raise HTTPException(400, "repo contains no .gguf files")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, f"unable to validate repo: {exc}")
+    cfg = yaml.safe_load(CONFIG_PATH.read_text())
+    cfg.setdefault("model_registry", {})
+    cfg["model_registry"].setdefault(req.role, {})
+    cfg["model_registry"][req.role].setdefault("options", [])
+    options = cfg["model_registry"][req.role]["options"]
+    if any(o.get("id") == req.model_id for o in options):
+        raise HTTPException(400, "model_id already exists")
+    model_dir = req.model_dir or req.model_id
+    opt = {
+        "id": req.model_id,
+        "provider": "local",
+        "role": req.role,
+        "model_dir": model_dir,
+        "repo_id": req.repo_id,
+        "filename_hint": req.filename_hint or "Q4_K_M",
+        "context": req.context or 8192,
+    }
+    options.append(opt)
+    if req.role == "vlm":
+        cfg.setdefault("models", {})
+        cfg["models"].setdefault("vlm", {})
+        cfg["models"]["vlm"]["enabled"] = True
+    CONFIG_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    if req.download_now:
+        try:
+            from scripts.download_models import download_one  # type: ignore
+            hint = req.filename_hint or "Q4_K_M"
+            out_dir = Path(APP_ROOT / "models" / model_dir)
+            download_one(req.repo_id, hint, out_dir)
+        except Exception as exc:
+            raise HTTPException(400, f"download failed: {exc}")
+    return {"status": "ok"}
+
+@app.post("/models/remove")
+def remove_model(req: ModelRemoveRequest):
+    if STATE["repo_root"] is None:
+        raise HTTPException(400, "init first")
+    if req.role not in ("reasoner", "coder", "vlm"):
+        raise HTTPException(400, "role must be reasoner, coder, or vlm")
+    cfg = yaml.safe_load(CONFIG_PATH.read_text())
+    options = (cfg.get("model_registry") or {}).get(req.role, {}).get("options", [])
+    remaining = [o for o in options if o.get("id") not in set(req.model_ids)]
+    removed = [o for o in options if o.get("id") in set(req.model_ids)]
+    if cfg.get("model_registry") and cfg["model_registry"].get(req.role):
+        cfg["model_registry"][req.role]["options"] = remaining
+    CONFIG_PATH.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    # Remove model files if downloaded
+    for opt in removed:
+        model_dir = opt.get("model_dir") or opt.get("id")
+        if not model_dir:
+            continue
+        path = Path(APP_ROOT / "models" / model_dir)
+        if path.exists() and path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+    return {"status": "ok", "removed": [o.get(\"id\") for o in removed]}
 
 class RunCommandRequest(BaseModel):
     command: str

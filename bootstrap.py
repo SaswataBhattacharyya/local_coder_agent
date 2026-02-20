@@ -97,28 +97,41 @@ def install_rlm() -> None:
 
 def download_models(hint: str) -> None:
     py = str(venv_python())
-    cfg = (ROOT/"configs"/"config.yaml").read_text()
-    # quick parse without yaml for MVP:
-    def get_line(prefix: str) -> str:
-        for line in cfg.splitlines():
-            if line.strip().startswith(prefix):
-                return line.split(":",1)[1].strip()
-        return ""
+    cfg = yaml.safe_load((ROOT/"configs"/"config.yaml").read_text())
     models_dir = ROOT/"models"
     models_dir.mkdir(exist_ok=True)
-    reasoner_repo = get_line("repo_id")
-    # Actually: we download all three by calling script with explicit repos.
-    repos = [
-        ("reasoner", "lmstudio-community/DeepSeek-R1-Distill-Qwen-7B-GGUF"),
-        ("coder", "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"),
-    ]
-    # VLM optional
-    enable_vlm = "enabled: true" in cfg
-    if enable_vlm:
-        repos.append(("vlm", "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF"))
 
-    for name, repo in repos:
-        out = models_dir / name
+    repos: list[tuple[str, str, str]] = []
+    # Base models
+    models_cfg = cfg.get("models", {})
+    for role in ["reasoner", "coder", "vlm"]:
+        m = models_cfg.get(role) or {}
+        if role == "vlm" and not m.get("enabled", False):
+            continue
+        repo_id = m.get("repo_id")
+        if repo_id:
+            repos.append((role, repo_id, role))
+
+    # Additional local options
+    registry = (cfg.get("model_registry") or {})
+    for role in ["reasoner", "coder", "vlm"]:
+        options = (registry.get(role) or {}).get("options") or []
+        for opt in options:
+            if opt.get("provider") != "local":
+                continue
+            repo_id = opt.get("repo_id")
+            if not repo_id:
+                continue
+            model_dir = opt.get("model_dir") or opt.get("id") or role
+            repos.append((role, repo_id, model_dir))
+
+    seen = set()
+    for role, repo, out_dir in repos:
+        key = (repo, out_dir)
+        if key in seen:
+            continue
+        seen.add(key)
+        out = models_dir / out_dir
         run([py, "scripts/download_models.py", "--repo", repo, "--hint", hint, "--out", str(out)])
 
 def start_server() -> None:

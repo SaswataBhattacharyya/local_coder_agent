@@ -21,6 +21,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
   private snapshotsText: string = "";
   private ingestStatusText: string = "";
   private warnedMissingContext: boolean = false;
+  private currentStreamReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -34,7 +35,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(async (msg: any) => {
       switch (msg.type) {
         case "send":
-          await this.handleUserMessage(msg.text);
+          await this.handleUserMessage(msg.text, msg.images || []);
           break;
         case "action":
           await this.runAction(msg.action, msg);
@@ -70,7 +71,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     this.refresh();
   }
 
-  private async handleUserMessage(text: string): Promise<void> {
+  private async handleUserMessage(text: string, images: any[] = []): Promise<void> {
     if (!text || !text.trim()) {
       return;
     }
@@ -85,7 +86,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get<boolean>("useStreaming", false);
     if (useStreaming) {
-      await this.handleUserMessageStream(text);
+      await this.handleUserMessageStream(text, images);
       return;
     }
     this.messages.push({ role: "user", text, timestamp: Date.now() });
@@ -95,7 +96,8 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     await this.ensureInit();
     this.markProgressDone("Connecting to server…");
     this.pushProgress("Planning request…", "running");
-    const workspaceContext = sendContext ? await gatherWorkspaceContext() : null;
+    const depth = vscode.workspace.getConfiguration("localCodeAgent").get<"shallow" | "standard" | "deep">("infoSummaryDepth", "standard");
+    const workspaceContext = sendContext ? await gatherWorkspaceContext(depth) : null;
     const res = await this.api.post<{
       state: string;
       questions?: string[];
@@ -104,7 +106,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       intent?: string;
       needs_confirm?: boolean;
       confirm_token?: string | null;
-    }>("/query", { user_text: text, workspace_context: workspaceContext });
+    }>("/query", { user_text: text, workspace_context: workspaceContext, images });
     if (!res.ok) {
       this.markProgressError("Planning request…");
       this.messages.push({ role: "assistant", text: `Query failed: ${res.error}`, timestamp: Date.now() });
@@ -135,7 +137,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     this.refresh();
   }
 
-  private async handleUserMessageStream(text: string): Promise<void> {
+  private async handleUserMessageStream(text: string, images: any[] = []): Promise<void> {
     this.messages.push({ role: "user", text, timestamp: Date.now() });
     this.progress = [];
     this.pushProgress("Connecting to server…", "running");
@@ -145,8 +147,9 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     this.pushProgress("Streaming response…", "running");
 
     const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get<boolean>("sendContextBundle", false);
-    const workspaceContext = sendContext ? await gatherWorkspaceContext() : null;
-    const res = await this.api.postStream("/query_stream", { user_text: text, workspace_context: workspaceContext });
+    const depth = vscode.workspace.getConfiguration("localCodeAgent").get<"shallow" | "standard" | "deep">("infoSummaryDepth", "standard");
+    const workspaceContext = sendContext ? await gatherWorkspaceContext(depth) : null;
+    const res = await this.api.postStream("/query_stream", { user_text: text, workspace_context: workspaceContext, images });
     if (!res.ok) {
       this.markProgressError("Streaming response…");
       this.messages.push({ role: "assistant", text: `Query failed: ${res.error}`, timestamp: Date.now() });
@@ -155,6 +158,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     }
 
     const msgIndex = this.messages.length;
+    this.currentStreamReader = res.reader;
     this.messages.push({ role: "assistant", text: "", timestamp: Date.now(), streaming: true });
     this.refresh();
 
@@ -175,6 +179,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       if (current && current.role === "assistant") {
         current.streaming = false;
       }
+      this.currentStreamReader = null;
       this.markProgressDone("Streaming response…");
       this.refresh();
   }
@@ -213,6 +218,12 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       case "ping":
         await this.ping();
         break;
+      case "interrupt":
+        await this.interrupt();
+        break;
+      case "mcpOpenConfig":
+        await this.openMcpConfig();
+        break;
       case "propose":
         await this.propose();
         break;
@@ -250,8 +261,59 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
         await this.snapshotCreate();
         break;
       case "snapshotRestore":
-        await this.snapshotRestore();
+        if (payload?.id) {
+          await this.snapshotRestoreById(payload.id);
+        } else {
+          await this.snapshotRestore();
+        }
         break;
+      case "addModel":
+        await this.addModel(payload);
+        break;
+      case "removeModel":
+        await this.removeModel(payload);
+        break;
+    }
+  }
+
+  private async addModel(payload: any): Promise<void> {
+    const res = await this.api.post<any>("/models/add", payload);
+    if (!res.ok) {
+      vscode.window.showErrorMessage(`Add model failed: ${res.error}`);
+      return;
+    }
+    await this.loadModels();
+  }
+
+  private async removeModel(payload: any): Promise<void> {
+    const res = await this.api.post<any>("/models/remove", payload);
+    if (!res.ok) {
+      vscode.window.showErrorMessage(`Remove model failed: ${res.error}`);
+      return;
+    }
+    await this.loadModels();
+  }
+
+  private async interrupt(): Promise<void> {
+    if (this.currentStreamReader) {
+      try {
+        await this.currentStreamReader.cancel();
+      } catch {}
+      this.currentStreamReader = null;
+      this.messages.push({ role: "assistant", text: "Request interrupted.", timestamp: Date.now() });
+      this.refresh();
+    }
+  }
+
+  private async openMcpConfig(): Promise<void> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return;
+    const path = vscode.Uri.joinPath(vscode.Uri.file(root), "configs", "mcp.yaml");
+    try {
+      const doc = await vscode.workspace.openTextDocument(path);
+      await vscode.window.showTextDocument(doc, { preview: true });
+    } catch {
+      // ignore if missing
     }
   }
 
@@ -275,10 +337,11 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     await this.ensureInit();
     const payload: any = { instruction };
     const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get<boolean>("sendContextBundle", false);
+    const depth = vscode.workspace.getConfiguration("localCodeAgent").get<"shallow" | "standard" | "deep">("infoSummaryDepth", "standard");
     if (sendContext) {
       const bundle = await gatherContext();
       payload.context = bundle;
-      const workspaceContext = await gatherWorkspaceContext();
+      const workspaceContext = await gatherWorkspaceContext(depth);
       payload.workspace_context = workspaceContext;
     }
     const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get<boolean>("useStreaming", false);
@@ -293,6 +356,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       let summary = "";
       let risk = "";
       const msgIndex = this.messages.length;
+      this.currentStreamReader = stream.reader;
       this.messages.push({ role: "assistant", text: "Streaming proposal…\n", timestamp: Date.now(), streaming: true });
       this.refresh();
       const decoder = new TextDecoder("utf-8");
@@ -330,6 +394,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       if (current && current.role === "assistant") {
         current.streaming = false;
       }
+      this.currentStreamReader = null;
       this.pending = { diff, summary, riskNotes: risk };
       this.messages.push({ role: "assistant", text: summary || "Proposal ready", timestamp: Date.now() });
       this.refresh();
@@ -362,10 +427,11 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     const payload: any = { instruction };
     const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get<boolean>("sendContextBundle", false);
+    const depth = vscode.workspace.getConfiguration("localCodeAgent").get<"shallow" | "standard" | "deep">("infoSummaryDepth", "standard");
     if (sendContext) {
       const bundle = await gatherContext();
       payload.context = bundle;
-      const workspaceContext = await gatherWorkspaceContext();
+      const workspaceContext = await gatherWorkspaceContext(depth);
       payload.workspace_context = workspaceContext;
     }
     const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get<boolean>("useStreaming", false);
@@ -380,6 +446,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       let summary = "";
       let risk = "";
       const msgIndex = this.messages.length;
+      this.currentStreamReader = stream.reader;
       this.messages.push({ role: "assistant", text: "Streaming revision…\n", timestamp: Date.now(), streaming: true });
       this.refresh();
       const decoder = new TextDecoder("utf-8");
@@ -417,6 +484,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       if (current && current.role === "assistant") {
         current.streaming = false;
       }
+      this.currentStreamReader = null;
       this.pending = { diff, summary, riskNotes: risk };
       this.messages.push({ role: "assistant", text: summary || "Revised pending patch", timestamp: Date.now() });
       this.refresh();
@@ -453,6 +521,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       const msgIndex = this.messages.length;
+      this.currentStreamReader = stream.reader;
       this.messages.push({ role: "assistant", text: "Approving…\n", timestamp: Date.now(), streaming: true });
       this.refresh();
       const decoder = new TextDecoder("utf-8");
@@ -487,6 +556,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       if (current && current.role === "assistant") {
         current.streaming = false;
       }
+      this.currentStreamReader = null;
       this.pending = null;
       await this.api.post<any>("/reset_context", {});
       this.refresh();
@@ -596,6 +666,16 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
   private async snapshotRestore(): Promise<void> {
     const id = await vscode.window.showInputBox({ prompt: "Snapshot ID to restore" });
     if (!id) return;
+    const res = await this.api.post<any>("/snapshots/restore", { snapshot_id: id });
+    if (!res.ok) {
+      vscode.window.showErrorMessage(`Snapshot restore failed: ${res.error}`);
+      return;
+    }
+    this.snapshotsText = JSON.stringify(res.data, null, 2);
+    this.refresh();
+  }
+
+  private async snapshotRestoreById(id: string): Promise<void> {
     const res = await this.api.post<any>("/snapshots/restore", { snapshot_id: id });
     if (!res.ok) {
       vscode.window.showErrorMessage(`Snapshot restore failed: ${res.error}`);

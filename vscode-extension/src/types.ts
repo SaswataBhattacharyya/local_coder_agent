@@ -22,4 +22,5 @@ export type WorkspaceContextBundle = {
   tree: { name: string; type: "file" | "dir" }[];
   files: { path: string; content: string }[];
   packageScripts?: Record<string, string>;
+  gatherMode?: "shallow" | "standard" | "deep";
 };

@@ -20,6 +20,31 @@ def find_gguf_model(model_dir: Path, filename_hint: str) -> Path:
 from llama_cpp import Llama
 
 @dataclass
+class LlamaVLMRuntime:
+    model_path: Path
+    n_ctx: int = 4096
+    n_gpu_layers: int = 0
+    temperature: float = 0.2
+
+    def _make(self) -> Llama:
+        # For multimodal models, llama.cpp expects a chat format that supports image_url content.
+        return Llama(
+            model_path=str(self.model_path),
+            n_ctx=self.n_ctx,
+            n_gpu_layers=self.n_gpu_layers,
+            verbose=False,
+            chat_format="qwen2-vl",
+        )
+
+    def chat_with_images(self, messages: List[Dict[str, Any]]) -> str:
+        llm = self._make()
+        out = llm.create_chat_completion(
+            messages=messages,
+            temperature=self.temperature,
+        )
+        return out["choices"][0]["message"]["content"]
+
+@dataclass
 class LlamaRuntime:
     model_path: Path
     n_ctx: int = 8192

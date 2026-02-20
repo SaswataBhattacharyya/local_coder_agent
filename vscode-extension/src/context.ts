@@ -49,9 +49,12 @@ export async function gatherContext(): Promise<ContextBundle> {
 }
 
 const MAX_FILE_CHARS = 12000;
-const MAX_TREE_ENTRIES = 200;
+const MAX_TREE_ENTRIES = 300;
+const MAX_EXTRA_FILES = 30;
 
-export async function gatherWorkspaceContext(): Promise<WorkspaceContextBundle | null> {
+export async function gatherWorkspaceContext(
+  depth: "shallow" | "standard" | "deep" = "standard",
+): Promise<WorkspaceContextBundle | null> {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri;
   if (!root) {
     return null;
@@ -62,6 +65,14 @@ export async function gatherWorkspaceContext(): Promise<WorkspaceContextBundle |
     const entries = await vscode.workspace.fs.readDirectory(root);
     for (const [name, type] of entries.slice(0, MAX_TREE_ENTRIES)) {
       tree.push({ name, type: type === vscode.FileType.Directory ? "dir" : "file" });
+    }
+    if (entries.find(([name, type]) => name === "src" && type === vscode.FileType.Directory)) {
+      const srcDir = vscode.Uri.joinPath(root, "src");
+      const srcEntries = await vscode.workspace.fs.readDirectory(srcDir);
+      for (const [name, type] of srcEntries.slice(0, MAX_TREE_ENTRIES)) {
+        const rel = `src/${name}`;
+        tree.push({ name: rel, type: type === vscode.FileType.Directory ? "dir" : "file" });
+      }
     }
   } catch {
     // ignore tree errors
@@ -93,12 +104,13 @@ export async function gatherWorkspaceContext(): Promise<WorkspaceContextBundle |
     "docker-compose.yml",
     "docker-compose.yaml",
     ".env.example",
+    "index.html",
   ];
   for (const name of fixedFiles) {
     toRead.push(vscode.Uri.joinPath(root, name));
   }
 
-  const configGlobs = ["vite.config.", "next.config."];
+  const configGlobs = ["vite.config.", "next.config.", "tailwind.config.", "eslint.config.", "vitest.config.", "tsconfig."];
   try {
     const entries = await vscode.workspace.fs.readDirectory(root);
     for (const [name, type] of entries) {
@@ -106,9 +118,57 @@ export async function gatherWorkspaceContext(): Promise<WorkspaceContextBundle |
       if (configGlobs.some((p) => name.startsWith(p))) {
         toRead.push(vscode.Uri.joinPath(root, name));
       }
+      if (name.endsWith(".lock") || name === "package-lock.json" || name === "pnpm-lock.yaml" || name === "yarn.lock" || name === "bun.lockb") {
+        toRead.push(vscode.Uri.joinPath(root, name));
+      }
     }
   } catch {
     // ignore
+  }
+
+  if (depth !== "shallow") {
+    const srcCandidates = [
+      "src/main.tsx",
+      "src/main.ts",
+      "src/index.tsx",
+      "src/index.ts",
+      "src/App.tsx",
+      "src/App.ts",
+      "src/app.tsx",
+      "src/app.ts",
+    ];
+    for (const rel of srcCandidates) {
+      toRead.push(vscode.Uri.joinPath(root, rel));
+    }
+    const extraDirs = ["src/pages", "src/routes", "src/components"];
+    for (const d of extraDirs) {
+      try {
+        const dir = vscode.Uri.joinPath(root, d);
+        const entries = await vscode.workspace.fs.readDirectory(dir);
+        for (const [name, type] of entries.slice(0, MAX_EXTRA_FILES)) {
+          if (type !== vscode.FileType.File) continue;
+          toRead.push(vscode.Uri.joinPath(dir, name));
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if (depth === "deep") {
+    try {
+      const srcDir = vscode.Uri.joinPath(root, "src");
+      const entries = await vscode.workspace.fs.readDirectory(srcDir);
+      let count = 0;
+      for (const [name, type] of entries) {
+        if (type !== vscode.FileType.File) continue;
+        toRead.push(vscode.Uri.joinPath(srcDir, name));
+        count += 1;
+        if (count >= MAX_EXTRA_FILES) break;
+      }
+    } catch {
+      // ignore
+    }
   }
 
   const scripts: Record<string, string> = {};
@@ -138,5 +198,6 @@ export async function gatherWorkspaceContext(): Promise<WorkspaceContextBundle |
     tree,
     files,
     packageScripts: Object.keys(scripts).length ? scripts : undefined,
+    gatherMode: depth,
   };
 }

@@ -108,6 +108,12 @@
           "type": "boolean",
           "default": false,
           "description": "Stream answers from the server (SSE/chunked)."
+        },
+        "localCodeAgent.infoSummaryDepth": {
+          "type": "string",
+          "enum": ["shallow", "standard", "deep"],
+          "default": "standard",
+          "description": "How much workspace context to send for INFO summaries."
         }
       }
     }

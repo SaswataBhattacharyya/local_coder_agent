@@ -155,6 +155,9 @@ def _detect_start_commands(repo_root: Path, readme_text: str | None) -> List[str
 
 def _detect_start_commands_from_context(ctx: Dict[str, Any], readme_text: str | None, pkg_text: str | None) -> List[str]:
     cmds: List[str] = []
+    install = _detect_install_from_context(ctx)
+    if install:
+        cmds.append(install)
     cmds.extend(_extract_readme_commands(readme_text))
     scripts = ctx.get("packageScripts") or {}
     if not scripts and pkg_text:
@@ -164,9 +167,10 @@ def _detect_start_commands_from_context(ctx: Dict[str, Any], readme_text: str | 
         except Exception:
             scripts = {}
     if isinstance(scripts, dict):
+        tool = _detect_tool_from_context(ctx)
         for key in ["dev", "start", "serve", "preview"]:
             if key in scripts:
-                cmds.append(f"npm run {key}")
+                cmds.append(f"{tool} run {key}")
     # fallback hints from tree
     tree = ctx.get("tree") or []
     names = {t.get("name") for t in tree if isinstance(t, dict)}
@@ -184,6 +188,34 @@ def _detect_start_commands_from_context(ctx: Dict[str, Any], readme_text: str | 
         if len(out) >= 3:
             break
     return out
+
+
+def _detect_tool_from_context(ctx: Dict[str, Any]) -> str:
+    tree = ctx.get("tree") or []
+    names = {t.get("name") for t in tree if isinstance(t, dict)}
+    if "bun.lockb" in names:
+        return "bun"
+    if "pnpm-lock.yaml" in names:
+        return "pnpm"
+    if "yarn.lock" in names:
+        return "yarn"
+    return "npm"
+
+
+def _detect_install_from_context(ctx: Dict[str, Any]) -> str | None:
+    tree = ctx.get("tree") or []
+    names = {t.get("name") for t in tree if isinstance(t, dict)}
+    if "bun.lockb" in names:
+        return "bun install"
+    if "pnpm-lock.yaml" in names:
+        return "pnpm install"
+    if "yarn.lock" in names:
+        return "yarn install"
+    if "package-lock.json" in names:
+        return "npm ci"
+    if "package.json" in names:
+        return "npm install"
+    return None
 
 
 def _npm_start_cmds(pkg_path: Path, repo_root: Path) -> List[str]:
@@ -289,6 +321,8 @@ def _detect_notes_from_context(ctx: Dict[str, Any], readme_text: str | None, pkg
         notes.append("Node.js dependencies detected (package.json).")
     if ".env.example" in names:
         notes.append("Environment variables may be required (.env.example found).")
+    if "index.html" in names and ("src/main.tsx" in names or "src/main.ts" in names):
+        notes.append("Entrypoint chain appears to be index.html -> src/main.* -> App.*.")
     if readme_text:
         for ln in readme_text.splitlines():
             if "Prerequisite" in ln or "Requirements" in ln:

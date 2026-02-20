@@ -10,27 +10,39 @@ type AgentState = {
   messages: ChatMessage[];
   pending: PendingPatch | null;
   modelStatusText: string;
+  modelInfo?: any;
   mcpStatusText: string;
   snapshotsText: string;
   ingestStatusText: string;
   progress?: { text: string; status: "running" | "done" | "error" }[];
 };
 
+type ImagePreview = { name: string; data: string };
+
+type Panel = "none" | "settings" | "mcp" | "history";
+
 const vscode = (window as any).acquireVsCodeApi?.();
 
 export const App: React.FC = () => {
-  const [tab, setTab] = useState<"chat" | "settings" | "history" | "mcp">("chat");
+  const [panel, setPanel] = useState<Panel>("none");
   const [state, setState] = useState<AgentState>({
     status: "Not connected",
     serverUrl: "",
     messages: [],
     pending: null,
     modelStatusText: "",
+    modelInfo: null,
     mcpStatusText: "",
     snapshotsText: "",
     ingestStatusText: "",
     progress: [],
   });
+  const [images, setImages] = useState<ImagePreview[]>([]);
+  const [showAddModel, setShowAddModel] = useState(false);
+  const [showRemoveModel, setShowRemoveModel] = useState(false);
+  const [removeRole, setRemoveRole] = useState("reasoner");
+  const [removeIds, setRemoveIds] = useState<string[]>([]);
+  const [modelForm, setModelForm] = useState({ role: "reasoner", model_id: "", repo_id: "", filename_hint: "Q4_K_M" });
 
   const diffFiles = useMemo<DiffFile[]>(() => {
     if (!state.pending?.diff) return [];
@@ -55,11 +67,16 @@ export const App: React.FC = () => {
   }, []);
 
   const send = () => {
-    const input = (document.getElementById("input") as HTMLTextAreaElement | null);
+    const input = document.getElementById("input") as HTMLTextAreaElement | null;
     const text = input?.value?.trim() || "";
-    if (!text) return;
-    vscode?.postMessage({ type: "send", text });
+    if (!text && images.length === 0) return;
+    vscode?.postMessage({ type: "send", text, images });
     if (input) input.value = "";
+    setImages([]);
+  };
+
+  const interrupt = () => {
+    vscode?.postMessage({ type: "action", action: "interrupt" });
   };
 
   const runAction = (action: string, payload: any = {}) => {
@@ -105,99 +122,519 @@ export const App: React.FC = () => {
     runAction("approve", { diff });
   };
 
+  const isStreaming = state.messages.some((m) => m.streaming);
+
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items || [];
+    const next: ImagePreview[] = [];
+    for (const item of items) {
+      if (item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        const reader = new FileReader();
+        reader.onload = () => {
+          next.push({ name: file.name || "pasted-image", data: String(reader.result || "") });
+          setImages((prev) => [...prev, ...next]);
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+  };
+
+  const onDrop = (e: React.DragEvent<HTMLTextAreaElement>) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files || []);
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) continue;
+      const reader = new FileReader();
+      reader.onload = () => {
+        setImages((prev) => [...prev, { name: file.name, data: String(reader.result || "") }]);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const onDragOver = (e: React.DragEvent<HTMLTextAreaElement>) => {
+    e.preventDefault();
+  };
+
+  const removeImage = (idx: number) => {
+    setImages((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const renderMarkdown = (text: string) => {
+    const escape = (s: string) =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    const blocks = text.split(/```/);
+    const out: React.ReactNode[] = [];
+    for (let i = 0; i < blocks.length; i++) {
+      if (i % 2 === 1) {
+        out.push(
+          <pre key={`code-${i}`} className="codeblock">
+            <code>{blocks[i]}</code>
+          </pre>,
+        );
+        continue;
+      }
+      const lines = blocks[i].split("\n");
+      const parts: React.ReactNode[] = [];
+      let list: string[] = [];
+      const flushList = () => {
+        if (list.length === 0) return;
+        parts.push(
+          <ul key={`list-${i}-${parts.length}`}>
+            {list.map((l, idx) => (
+              <li key={idx}>{l}</li>
+            ))}
+          </ul>,
+        );
+        list = [];
+      };
+      for (const line of lines) {
+        if (line.startsWith("- ")) {
+          list.push(line.slice(2));
+          continue;
+        }
+        flushList();
+        if (line.startsWith("# ")) {
+          parts.push(<h3 key={`h-${i}-${parts.length}`}>{line.slice(2)}</h3>);
+        } else if (line.trim() === "") {
+          parts.push(<div key={`br-${i}-${parts.length}`} className="spacer" />);
+        } else {
+          const html = escape(line).replace(/`([^`]+)`/g, "<code>$1</code>");
+          parts.push(
+            <div key={`t-${i}-${parts.length}`} dangerouslySetInnerHTML={{ __html: html }} />,
+          );
+        }
+      }
+      flushList();
+      out.push(<div key={`blk-${i}`}>{parts}</div>);
+    }
+    return out;
+  };
+
+  const parsedMcp = (() => {
+    try {
+      return JSON.parse(state.mcpStatusText || "{}");
+    } catch {
+      return null;
+    }
+  })();
+
+  const parsedSnapshots = (() => {
+    try {
+      return JSON.parse(state.snapshotsText || "{}");
+    } catch {
+      return null;
+    }
+  })();
+
   return (
     <div className="app">
-      <div className="header">
-        <div className="title">Local Code Agent</div>
+      <div className="topbar">
         <div className="status">Status: {state.status}</div>
         <div className="status">Server: {state.serverUrl}</div>
-      </div>
-
-      <div className="tabs">
-        {["chat", "settings", "history", "mcp"].map((t) => (
-          <button key={t} className={tab === t ? "tab active" : "tab"} onClick={() => setTab(t as any)}>
-            {t.toUpperCase()}
+        <div className="controls">
+          <button onClick={() => runAction("ping")}>Ping</button>
+          <button onClick={() => setPanel(panel === "settings" ? "none" : "settings")}>Settings</button>
+          <button
+            onClick={() => {
+              setPanel(panel === "mcp" ? "none" : "mcp");
+              runAction("mcpOpenConfig");
+            }}
+          >
+            MCP
           </button>
-        ))}
+          <button onClick={() => setPanel(panel === "history" ? "none" : "history")}>History</button>
+        </div>
       </div>
 
-      {tab === "chat" && (
-        <div className="section chat-section">
-          {state.progress && state.progress.length > 0 && (
-            <div className="progress">
-              {state.progress.map((p, i) => (
-                <div key={i} className={`progress-item ${p.status}`}>
-                  <span className={p.status === "running" ? "dotdot" : ""}>{p.text}</span>
+      {panel !== "none" && (
+        <div className="panel-area">
+          {panel === "settings" && (
+            <div className="panel">
+              <h3>Models</h3>
+              <button onClick={() => setShowAddModel(true)}>Add Model</button>
+              <button onClick={() => setShowRemoveModel(true)}>Remove Models</button>
+              <div className="field">
+                <label>Reasoning Model</label>
+                <select
+                  value={(state.modelInfo?.reasoner?.selected === "best" ? (state.modelInfo?.reasoner?.default || "") : (state.modelInfo?.reasoner?.selected || ""))}
+                  onChange={(e) => vscode?.postMessage({ type: "selectModel", role: "reasoner", modelId: e.target.value })}
+                >
+                  {(state.modelInfo?.reasoner?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
+                    <option key={opt.id} value={opt.id}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label>Coding Model</label>
+                <select
+                  value={(state.modelInfo?.coder?.selected === "best" ? (state.modelInfo?.coder?.default || "") : (state.modelInfo?.coder?.selected || ""))}
+                  onChange={(e) => vscode?.postMessage({ type: "selectModel", role: "coder", modelId: e.target.value })}
+                >
+                  {(state.modelInfo?.coder?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
+                    <option key={opt.id} value={opt.id}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label>Image Model</label>
+                <select
+                  value={(state.modelInfo?.vlm?.selected === "best" ? (state.modelInfo?.vlm?.default || "") : (state.modelInfo?.vlm?.selected || ""))}
+                  onChange={(e) => vscode?.postMessage({ type: "selectModel", role: "vlm", modelId: e.target.value })}
+                >
+                  {(state.modelInfo?.vlm?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
+                    <option key={opt.id} value={opt.id}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+              <h3>Plugins</h3>
+              <div className="field">
+                <label>Plugins</label>
+                <select disabled>
+                  <option>No plugins installed</option>
+                </select>
+              </div>
+            
+          {showAddModel && (
+            <div className="modal">
+              <div className="modal-card">
+                <h3>Add Model</h3>
+                <div className="field">
+                  <label>Type</label>
+                  <select
+                    value={modelForm.role}
+                    onChange={(e) => setModelForm({ ...modelForm, role: e.target.value })}
+                  >
+                    <option value="reasoner">Reasoning</option>
+                    <option value="coder">Coder</option>
+                    <option value="vlm">Image</option>
+                  </select>
                 </div>
-              ))}
+                <div className="field">
+                  <label>Model Name</label>
+                  <input
+                    value={modelForm.model_id}
+                    onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })}
+                    placeholder="e.g. my-qwen-model"
+                  />
+                </div>
+                <div className="field">
+                  <label>Model Link (HuggingFace repo)</label>
+                  <input
+                    value={modelForm.repo_id}
+                    onChange={(e) => setModelForm({ ...modelForm, repo_id: e.target.value })}
+                    placeholder="org/model-repo"
+                  />
+                </div>
+                <div className="field">
+                  <label>Filename Hint</label>
+                  <input
+                    value={modelForm.filename_hint}
+                    onChange={(e) => setModelForm({ ...modelForm, filename_hint: e.target.value })}
+                    placeholder="Q4_K_M"
+                  />
+                </div>
+                <div className="field">
+                  <label>Download</label>
+                  <select
+                    value={modelForm.download_now ? "now" : "later"}
+                    onChange={(e) => setModelForm({ ...modelForm, download_now: e.target.value === "now" })}
+                  >
+                    <option value="now">Download now</option>
+                    <option value="later">Download later</option>
+                  </select>
+                </div>
+                <div className="row">
+                  <button onClick={() => setShowAddModel(false)}>Cancel</button>
+                  <button
+                    onClick={() => {
+                      vscode?.postMessage({ type: "action", action: "addModel", ...modelForm, download_now: true });
+                      setShowAddModel(false);
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
             </div>
           )}
-          <div className="chat">
-            {state.messages.map((m, idx) => (
-              <div key={idx} className={`msg ${m.role}`}>
-                <span>{m.text}</span>
-                {m.streaming && <span className="streaming-dots" />}
+</div>
+          )}
+
+          {panel === "mcp" && (
+            <div className="panel">
+              <h3>MCP</h3>
+              {!parsedMcp && <div className="muted">No MCP status available.</div>}
+              {parsedMcp && (
+                <div className="list">
+                  {(parsedMcp.servers || []).map((s: string) => (
+                    <div key={s} className="list-row">
+                      <div>{s}</div>
+                      <div className="tag">{parsedMcp.mcp_allowed ? "Usable" : "Disabled"}</div>
+                    </div>
+                  ))}
+                  {parsedMcp.repo_root && (
+                    <div className="muted">Repo: {parsedMcp.repo_root}</div>
+                  )}
+                </div>
+              )}
+            
+          {showAddModel && (
+            <div className="modal">
+              <div className="modal-card">
+                <h3>Add Model</h3>
+                <div className="field">
+                  <label>Type</label>
+                  <select
+                    value={modelForm.role}
+                    onChange={(e) => setModelForm({ ...modelForm, role: e.target.value })}
+                  >
+                    <option value="reasoner">Reasoning</option>
+                    <option value="coder">Coder</option>
+                    <option value="vlm">Image</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Model Name</label>
+                  <input
+                    value={modelForm.model_id}
+                    onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })}
+                    placeholder="e.g. my-qwen-model"
+                  />
+                </div>
+                <div className="field">
+                  <label>Model Link (HuggingFace repo)</label>
+                  <input
+                    value={modelForm.repo_id}
+                    onChange={(e) => setModelForm({ ...modelForm, repo_id: e.target.value })}
+                    placeholder="org/model-repo"
+                  />
+                </div>
+                <div className="field">
+                  <label>Filename Hint</label>
+                  <input
+                    value={modelForm.filename_hint}
+                    onChange={(e) => setModelForm({ ...modelForm, filename_hint: e.target.value })}
+                    placeholder="Q4_K_M"
+                  />
+                </div>
+                <div className="field">
+                  <label>Download</label>
+                  <select
+                    value={modelForm.download_now ? "now" : "later"}
+                    onChange={(e) => setModelForm({ ...modelForm, download_now: e.target.value === "now" })}
+                  >
+                    <option value="now">Download now</option>
+                    <option value="later">Download later</option>
+                  </select>
+                </div>
+                <div className="row">
+                  <button onClick={() => setShowAddModel(false)}>Cancel</button>
+                  <button
+                    onClick={() => {
+                      vscode?.postMessage({ type: "action", action: "addModel", ...modelForm, download_now: true });
+                      setShowAddModel(false);
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+</div>
+          )}
+
+          {panel === "history" && (
+            <div className="panel">
+              <h3>Snapshots</h3>
+              {parsedSnapshots?.snapshots?.length ? (
+                <div className="list">
+                  {parsedSnapshots.snapshots.map((s: any) => (
+                    <div key={s.snapshot_id} className="list-row">
+                      <div>
+                        <div className="strong">{s.snapshot_id}</div>
+                        <div className="muted">{new Date((s.created_at || 0) * 1000).toLocaleString()}</div>
+                      </div>
+                      <button onClick={() => runAction("snapshotRestore", { id: s.snapshot_id })}>Restore</button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="muted">No snapshots yet.</div>
+              )}
+            
+          {showAddModel && (
+            <div className="modal">
+              <div className="modal-card">
+                <h3>Add Model</h3>
+                <div className="field">
+                  <label>Type</label>
+                  <select
+                    value={modelForm.role}
+                    onChange={(e) => setModelForm({ ...modelForm, role: e.target.value })}
+                  >
+                    <option value="reasoner">Reasoning</option>
+                    <option value="coder">Coder</option>
+                    <option value="vlm">Image</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Model Name</label>
+                  <input
+                    value={modelForm.model_id}
+                    onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })}
+                    placeholder="e.g. my-qwen-model"
+                  />
+                </div>
+                <div className="field">
+                  <label>Model Link (HuggingFace repo)</label>
+                  <input
+                    value={modelForm.repo_id}
+                    onChange={(e) => setModelForm({ ...modelForm, repo_id: e.target.value })}
+                    placeholder="org/model-repo"
+                  />
+                </div>
+                <div className="field">
+                  <label>Filename Hint</label>
+                  <input
+                    value={modelForm.filename_hint}
+                    onChange={(e) => setModelForm({ ...modelForm, filename_hint: e.target.value })}
+                    placeholder="Q4_K_M"
+                  />
+                </div>
+                <div className="field">
+                  <label>Download</label>
+                  <select
+                    value={modelForm.download_now ? "now" : "later"}
+                    onChange={(e) => setModelForm({ ...modelForm, download_now: e.target.value === "now" })}
+                  >
+                    <option value="now">Download now</option>
+                    <option value="later">Download later</option>
+                  </select>
+                </div>
+                <div className="row">
+                  <button onClick={() => setShowAddModel(false)}>Cancel</button>
+                  <button
+                    onClick={() => {
+                      vscode?.postMessage({ type: "action", action: "addModel", ...modelForm, download_now: true });
+                      setShowAddModel(false);
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+</div>
+          )}
+        </div>
+      )}
+
+          {showRemoveModel && (
+            <div className="modal modal-remove">
+              <div className="modal-card">
+                <h3>Remove Models</h3>
+                <div className="field">
+                  <label>Type</label>
+                  <select value={removeRole} onChange={(e) => { setRemoveRole(e.target.value); setRemoveIds([]); }}>
+                    <option value="reasoner">Reasoning</option>
+                    <option value="coder">Coder</option>
+                    <option value="vlm">Image</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Models</label>
+                  <div className="checkbox-list">
+                    {(state.modelInfo?.[removeRole]?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
+                      <label key={opt.id} className="checkbox-item">
+                        <input
+                          type="checkbox"
+                          checked={removeIds.includes(opt.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) setRemoveIds([...removeIds, opt.id]);
+                            else setRemoveIds(removeIds.filter((id) => id !== opt.id));
+                          }}
+                        />
+                        <span>{opt.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="row">
+                  <button onClick={() => setShowRemoveModel(false)}>Cancel</button>
+                  <button
+                    onClick={() => {
+                      vscode?.postMessage({ type: "action", action: "removeModel", role: removeRole, model_ids: removeIds });
+                      setShowRemoveModel(false);
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+      <div className="chat-area">
+        {state.progress && state.progress.length > 0 && (
+          <div className="system-messages">
+            {state.progress.map((p, i) => (
+              <div key={i} className={`system-line ${p.status}`}>{p.text}</div>
+            ))}
+          </div>
+        )}
+        <div className="messages">
+          {state.messages.map((m, idx) => (
+            <div key={idx} className={`msg ${m.role}`}>
+              {m.role === "assistant" ? renderMarkdown(m.text) : <div>{m.text}</div>}
+              {m.streaming && <span className="streaming-dots" />}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {state.pending?.diff && (
+        <div className="patch-actions">
+          <button onClick={approveSelected}>Approve Changes</button>
+          <button onClick={() => runAction("reject")}>Reject Changes</button>
+        </div>
+      )}
+
+      <div className="input-area">
+        <div className="input-wrap">
+          <textarea
+            id="input"
+            placeholder="Describe your request..."
+            onPaste={onPaste}
+            onDrop={onDrop}
+            onDragOver={onDragOver}
+          />
+          <button
+            className={`send-btn ${isStreaming ? "busy" : ""}`}
+            onClick={isStreaming ? interrupt : send}
+            title={isStreaming ? "Interrupt" : "Send"}
+          >
+            {isStreaming ? "⏸" : "▶"}
+          </button>
+        </div>
+        {images.length > 0 && (
+          <div className="image-strip">
+            {images.map((img, i) => (
+              <div key={i} className="thumb">
+                <img src={img.data} alt={img.name} />
+                <button onClick={() => removeImage(i)}>×</button>
               </div>
             ))}
           </div>
-          <textarea id="input" placeholder="Describe your request..." />
-          <div className="row">
-            <button onClick={send}>Send</button>
-            <button onClick={() => runAction("ping")}>Ping Server</button>
-          </div>
+        )}
+      </div>
 
-          <div className="pending">
-            <div><strong>Summary:</strong> {state.pending?.summary || ""}</div>
-            <div><strong>Risk:</strong> {state.pending?.riskNotes || ""}</div>
-            <div><strong>Ingest:</strong> {state.ingestStatusText || ""}</div>
-          </div>
-
-          <div className="actions">
-            <button onClick={() => runAction("propose")}>Propose</button>
-            <button onClick={() => runAction("revise")}>Revise Pending</button>
-            <button onClick={approveSelected}>Approve Selected</button>
-            <button onClick={() => runAction("reject")}>Reject Pending</button>
-            <button onClick={() => runAction("reset")}>Reset Context</button>
-          </div>
-        </div>
-      )}
-
-      {tab === "settings" && (
-        <div className="section">
-          <div className="panel">
-            <h3>Models</h3>
-            <pre className="diff">{state.modelStatusText}</pre>
-            <div className="row">
-              <button onClick={() => runAction("modelsRefresh")}>Refresh Models</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {tab === "history" && (
-        <div className="section">
-          <div className="row">
-            <button onClick={() => runAction("snapshotsRefresh")}>Refresh</button>
-            <button onClick={() => runAction("snapshotCreate")}>Create Snapshot</button>
-            <button onClick={() => runAction("snapshotRestore")}>Restore Snapshot</button>
-          </div>
-          <pre className="diff">{state.snapshotsText}</pre>
-        </div>
-      )}
-
-      {tab === "mcp" && (
-        <div className="section">
-          <div className="row">
-            <button onClick={() => runAction("mcpAllow")}>MCP Allow</button>
-            <button onClick={() => runAction("mcpRevoke")}>MCP Revoke</button>
-            <button onClick={() => runAction("mcpStatus")}>MCP Status</button>
-            <button onClick={() => runAction("mcpReload")}>MCP Reload</button>
-          </div>
-          <pre className="diff">{state.mcpStatusText}</pre>
-        </div>
-      )}
-
-      {tab === "chat" && state.pending?.diff && (
+      {state.pending?.diff && (
         <div className="diff-view">
           <div className="row">
             <button onClick={approveAll}>Approve All</button>
@@ -228,6 +665,51 @@ export const App: React.FC = () => {
           ))}
         </div>
       )}
+
+          {showRemoveModel && (
+            <div className="modal modal-remove">
+              <div className="modal-card">
+                <h3>Remove Models</h3>
+                <div className="field">
+                  <label>Type</label>
+                  <select value={removeRole} onChange={(e) => { setRemoveRole(e.target.value); setRemoveIds([]); }}>
+                    <option value="reasoner">Reasoning</option>
+                    <option value="coder">Coder</option>
+                    <option value="vlm">Image</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>Models</label>
+                  <div className="checkbox-list">
+                    {(state.modelInfo?.[removeRole]?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
+                      <label key={opt.id} className="checkbox-item">
+                        <input
+                          type="checkbox"
+                          checked={removeIds.includes(opt.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) setRemoveIds([...removeIds, opt.id]);
+                            else setRemoveIds(removeIds.filter((id) => id !== opt.id));
+                          }}
+                        />
+                        <span>{opt.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="row">
+                  <button onClick={() => setShowRemoveModel(false)}>Cancel</button>
+                  <button
+                    onClick={() => {
+                      vscode?.postMessage({ type: "action", action: "removeModel", role: removeRole, model_ids: removeIds });
+                      setShowRemoveModel(false);
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
     </div>
   );
 };

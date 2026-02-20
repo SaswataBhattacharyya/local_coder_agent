@@ -54,6 +54,7 @@ class AgentViewProvider {
         this.mcpStatusText = "";
         this.snapshotsText = "";
         this.ingestStatusText = "";
+        this.warnedMissingContext = false;
     }
     resolveWebviewView(view) {
         this.view = view;
@@ -103,6 +104,15 @@ class AgentViewProvider {
         if (!text || !text.trim()) {
             return;
         }
+        const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
+        if (!sendContext && !this.warnedMissingContext) {
+            this.warnedMissingContext = true;
+            this.messages.push({
+                role: "assistant",
+                text: "Heads up: sendContextBundle is disabled. In VM mode the server cannot see your local files, so summaries may be empty. Enable localCodeAgent.sendContextBundle.",
+                timestamp: Date.now(),
+            });
+        }
         const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get("useStreaming", false);
         if (useStreaming) {
             await this.handleUserMessageStream(text);
@@ -115,8 +125,8 @@ class AgentViewProvider {
         await this.ensureInit();
         this.markProgressDone("Connecting to server…");
         this.pushProgress("Planning request…", "running");
-        const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
-        const workspaceContext = sendContext ? await (0, context_1.gatherWorkspaceContext)() : null;
+        const depth = vscode.workspace.getConfiguration("localCodeAgent").get("infoSummaryDepth", "standard");
+        const workspaceContext = sendContext ? await (0, context_1.gatherWorkspaceContext)(depth) : null;
         const res = await this.api.post("/query", { user_text: text, workspace_context: workspaceContext });
         if (!res.ok) {
             this.markProgressError("Planning request…");
@@ -156,7 +166,8 @@ class AgentViewProvider {
         this.markProgressDone("Connecting to server…");
         this.pushProgress("Streaming response…", "running");
         const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
-        const workspaceContext = sendContext ? await (0, context_1.gatherWorkspaceContext)() : null;
+        const depth = vscode.workspace.getConfiguration("localCodeAgent").get("infoSummaryDepth", "standard");
+        const workspaceContext = sendContext ? await (0, context_1.gatherWorkspaceContext)(depth) : null;
         const res = await this.api.postStream("/query_stream", { user_text: text, workspace_context: workspaceContext });
         if (!res.ok) {
             this.markProgressError("Streaming response…");
@@ -283,10 +294,11 @@ class AgentViewProvider {
         await this.ensureInit();
         const payload = { instruction };
         const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
+        const depth = vscode.workspace.getConfiguration("localCodeAgent").get("infoSummaryDepth", "standard");
         if (sendContext) {
             const bundle = await (0, context_1.gatherContext)();
             payload.context = bundle;
-            const workspaceContext = await (0, context_1.gatherWorkspaceContext)();
+            const workspaceContext = await (0, context_1.gatherWorkspaceContext)(depth);
             payload.workspace_context = workspaceContext;
         }
         const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get("useStreaming", false);
@@ -375,10 +387,11 @@ class AgentViewProvider {
         }
         const payload = { instruction };
         const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
+        const depth = vscode.workspace.getConfiguration("localCodeAgent").get("infoSummaryDepth", "standard");
         if (sendContext) {
             const bundle = await (0, context_1.gatherContext)();
             payload.context = bundle;
-            const workspaceContext = await (0, context_1.gatherWorkspaceContext)();
+            const workspaceContext = await (0, context_1.gatherWorkspaceContext)(depth);
             payload.workspace_context = workspaceContext;
         }
         const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get("useStreaming", false);

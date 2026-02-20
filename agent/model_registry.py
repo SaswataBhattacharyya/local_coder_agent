@@ -18,13 +18,14 @@ class ModelOption:
     model_dir: str | None = None
     filename_hint: str | None = None
     context: int | None = None
+    repo_id: str | None = None
 
 
 def load_registry(config: AppConfig, repo_root: Path) -> Dict[str, List[ModelOption]]:
-    registry: Dict[str, List[ModelOption]] = {"reasoner": [], "coder": []}
+    registry: Dict[str, List[ModelOption]] = {"reasoner": [], "coder": [], "vlm": []}
     cfg = getattr(config, "model_registry", None)
     if cfg:
-        for role in ["reasoner", "coder"]:
+        for role in ["reasoner", "coder", "vlm"]:
             options = (cfg.get(role) or {}).get("options") or []
             for opt in options:
                 registry[role].append(ModelOption(**opt))
@@ -33,16 +34,31 @@ def load_registry(config: AppConfig, repo_root: Path) -> Dict[str, List[ModelOpt
     if keys.get("OPENAI_API_KEY"):
         registry["reasoner"].append(ModelOption(id="openai-gpt-4o-mini", provider="openai", role="reasoner", model="gpt-4o-mini"))
         registry["coder"].append(ModelOption(id="openai-gpt-4o-mini", provider="openai", role="coder", model="gpt-4o-mini"))
+        registry["vlm"].append(ModelOption(id="openai-gpt-4o-mini", provider="openai", role="vlm", model="gpt-4o-mini"))
     if keys.get("GEMINI_API_KEY"):
         registry["reasoner"].append(ModelOption(id="gemini-2.5-flash", provider="gemini", role="reasoner", model="gemini-2.5-flash"))
         registry["coder"].append(ModelOption(id="gemini-2.5-flash", provider="gemini", role="coder", model="gemini-2.5-flash"))
+        registry["vlm"].append(ModelOption(id="gemini-2.5-flash", provider="gemini", role="vlm", model="gemini-2.5-flash"))
+    # Add local VLM option if enabled in config
+    try:
+        if getattr(config, "vlm", None) and getattr(config.vlm, "enabled", False):
+            registry["vlm"].append(ModelOption(
+                id="local-vlm",
+                provider="local",
+                role="vlm",
+                model_dir="vlm",
+                filename_hint=config.vlm.filename_hint,
+                context=config.vlm.context,
+            ))
+    except Exception:
+        pass
     return registry
 
 
 def get_defaults(config: AppConfig) -> Dict[str, str]:
-    defaults = {"reasoner": "", "coder": ""}
+    defaults = {"reasoner": "", "coder": "", "vlm": ""}
     cfg = getattr(config, "model_registry", None) or {}
-    for role in ["reasoner", "coder"]:
+    for role in ["reasoner", "coder", "vlm"]:
         defaults[role] = (cfg.get(role) or {}).get("default", "")
     return defaults
 
@@ -52,7 +68,7 @@ def get_selected_from_config(config_path: Path) -> Dict[str, str]:
         return {}
     data = yaml.safe_load(config_path.read_text()) or {}
     sel = (data.get("model_registry") or {}).get("selected") or {}
-    return {"reasoner": sel.get("reasoner", ""), "coder": sel.get("coder", "")}
+    return {"reasoner": sel.get("reasoner", ""), "coder": sel.get("coder", ""), "vlm": sel.get("vlm", "")}
 
 
 def set_selected_in_config(config_path: Path, role: str, model_id: str) -> None:
