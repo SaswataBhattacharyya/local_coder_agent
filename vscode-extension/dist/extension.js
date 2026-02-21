@@ -56,6 +56,9 @@ class AgentViewProvider {
         this.ingestStatusText = "";
         this.warnedMissingContext = false;
         this.currentStreamReader = null;
+        this.indexStatus = null;
+        this.indexPoller = null;
+        this.lastIndexEventId = 0;
     }
     resolveWebviewView(view) {
         this.view = view;
@@ -78,6 +81,7 @@ class AgentViewProvider {
             }
         });
         this.refresh();
+        this.startIndexPolling();
     }
     async ensureInit() {
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -99,6 +103,7 @@ class AgentViewProvider {
         this.status = "Connected";
         await this.loadModels(false);
         await this.snapshotsRefresh();
+        await this.refreshIndexStatus();
         this.refresh();
     }
     async handleUserMessage(text, images = []) {
@@ -125,9 +130,11 @@ class AgentViewProvider {
         this.refresh();
         await this.ensureInit();
         this.markProgressDone("Connecting to server…");
-        this.pushProgress("Planning request…", "running");
+        this.pushProgress("Reading workspace files…", "running");
         const depth = vscode.workspace.getConfiguration("localCodeAgent").get("infoSummaryDepth", "standard");
         const workspaceContext = sendContext ? await (0, context_1.gatherWorkspaceContext)(depth) : null;
+        this.markProgressDone("Reading workspace files…");
+        this.pushProgress("Planning request…", "running");
         const res = await this.api.post("/query", { user_text: text, workspace_context: workspaceContext, images });
         if (!res.ok) {
             this.markProgressError("Planning request…");
@@ -168,7 +175,9 @@ class AgentViewProvider {
         this.pushProgress("Streaming response…", "running");
         const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
         const depth = vscode.workspace.getConfiguration("localCodeAgent").get("infoSummaryDepth", "standard");
+        this.pushProgress("Reading workspace files…", "running");
         const workspaceContext = sendContext ? await (0, context_1.gatherWorkspaceContext)(depth) : null;
+        this.markProgressDone("Reading workspace files…");
         const res = await this.api.postStream("/query_stream", { user_text: text, workspace_context: workspaceContext, images });
         if (!res.ok) {
             this.markProgressError("Streaming response…");
@@ -222,6 +231,11 @@ class AgentViewProvider {
             if (current && current.role === "assistant") {
                 current.text += data;
             }
+            this.refresh();
+            return;
+        }
+        if (eventName === "status") {
+            this.pushProgress(data, "running");
             this.refresh();
             return;
         }
@@ -340,6 +354,7 @@ class AgentViewProvider {
         if (res.ok) {
             this.status = "Connected";
             this.mcpStatusText = JSON.stringify(res.data, null, 2);
+            await this.refreshIndexStatus();
         }
         else {
             this.status = `Ping failed: ${res.error}`;
@@ -356,10 +371,12 @@ class AgentViewProvider {
         const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
         const depth = vscode.workspace.getConfiguration("localCodeAgent").get("infoSummaryDepth", "standard");
         if (sendContext) {
+            this.pushProgress("Reading workspace files…", "running");
             const bundle = await (0, context_1.gatherContext)();
             payload.context = bundle;
             const workspaceContext = await (0, context_1.gatherWorkspaceContext)(depth);
             payload.workspace_context = workspaceContext;
+            this.markProgressDone("Reading workspace files…");
         }
         const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get("useStreaming", false);
         if (useStreaming) {
@@ -451,10 +468,12 @@ class AgentViewProvider {
         const sendContext = vscode.workspace.getConfiguration("localCodeAgent").get("sendContextBundle", false);
         const depth = vscode.workspace.getConfiguration("localCodeAgent").get("infoSummaryDepth", "standard");
         if (sendContext) {
+            this.pushProgress("Reading workspace files…", "running");
             const bundle = await (0, context_1.gatherContext)();
             payload.context = bundle;
             const workspaceContext = await (0, context_1.gatherWorkspaceContext)(depth);
             payload.workspace_context = workspaceContext;
+            this.markProgressDone("Reading workspace files…");
         }
         const useStreaming = vscode.workspace.getConfiguration("localCodeAgent").get("useStreaming", false);
         if (useStreaming) {
@@ -765,11 +784,15 @@ class AgentViewProvider {
                 snapshotsText: this.snapshotsText,
                 ingestStatusText: this.ingestStatusText,
                 progress: this.progress,
+                indexStatus: this.indexStatus,
             });
         }
     }
     pushProgress(text, status) {
         this.progress.push({ text, status });
+        if (this.progress.length > 12) {
+            this.progress = this.progress.slice(-12);
+        }
     }
     markProgressDone(text) {
         const item = this.progress.find((p) => p.text === text);
@@ -780,6 +803,41 @@ class AgentViewProvider {
         const item = this.progress.find((p) => p.text === text);
         if (item)
             item.status = "error";
+    }
+    startIndexPolling() {
+        if (this.indexPoller)
+            return;
+        this.indexPoller = setInterval(() => {
+            this.refreshIndexStatus();
+        }, 5000);
+        this.context.subscriptions.push({ dispose: () => this.stopIndexPolling() });
+    }
+    stopIndexPolling() {
+        if (this.indexPoller) {
+            clearInterval(this.indexPoller);
+            this.indexPoller = null;
+        }
+    }
+    async refreshIndexStatus() {
+        const res = await this.api.get(`/index/status?after_id=${this.lastIndexEventId}`);
+        if (!res.ok) {
+            return;
+        }
+        this.indexStatus = res.data;
+        const events = res.data.events || [];
+        for (const evt of events) {
+            const text = evt?.text ? `Indexer: ${evt.text}` : "";
+            if (text) {
+                this.pushProgress(text, "running");
+            }
+            if (evt?.id && evt.id > this.lastIndexEventId) {
+                this.lastIndexEventId = evt.id;
+            }
+        }
+        if (this.indexStatus?.last_error) {
+            this.pushProgress(`Indexer error: ${this.indexStatus.last_error}`, "error");
+        }
+        this.refresh();
     }
     getHtml(webview) {
         const nonce = getNonce();

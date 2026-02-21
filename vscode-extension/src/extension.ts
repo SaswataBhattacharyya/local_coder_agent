@@ -123,6 +123,10 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     this.markProgressDone("Planning request…");
     if (res.data.answer) {
       this.pushProgress("Answer ready.", "done");
+      if ((res.data as any).metrics) {
+        const m = (res.data as any).metrics;
+        this.pushProgress(`Metrics: in=${m.input_tokens} tok, out=${m.output_tokens} tok, chunks=${m.chunks_retrieved}`, "done");
+      }
       this.messages.push({ role: "assistant", text: res.data.answer, timestamp: Date.now() });
       this.refresh();
       return;
@@ -217,6 +221,17 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     if (eventName === "status") {
       this.pushProgress(data, "running");
+      this.refresh();
+      return;
+    }
+    if (eventName === "metrics") {
+      try {
+        const metrics = JSON.parse(data);
+        const line = `Metrics: in=${metrics.input_tokens} tok, out=${metrics.output_tokens} tok, chunks=${metrics.chunks_retrieved}`;
+        this.pushProgress(line, "done");
+      } catch {
+        this.pushProgress(`Metrics: ${data}`, "done");
+      }
       this.refresh();
       return;
     }

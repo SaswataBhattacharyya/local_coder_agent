@@ -223,6 +223,18 @@ def _sse_event(event: str, data: str) -> str:
     payload = "".join([f"data: {line}\n" for line in lines])
     return f"event: {event}\n{payload}\n"
 
+def _index_events_path() -> Path | None:
+    repo_root = STATE.get("repo_root")
+    if not repo_root:
+        return None
+    if ".agent_stateless" in str(repo_root):
+        return None
+    try:
+        path = Path(repo_root) / ".agent" / "index_events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    except Exception:
+        return None
 
 def _record_index_event(text: str) -> None:
     if not text:
@@ -239,6 +251,16 @@ def _record_index_event(text: str) -> None:
     if len(events) > 50:
         events = events[-50:]
     STATE["index_events"] = events
+    path = _index_events_path()
+    if path is not None:
+        try:
+            path.write_text(path.read_text() + json.dumps(evt) + "\n")
+        except Exception:
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(evt) + "\n")
+            except Exception:
+                pass
 
 
 def _update_index_sig() -> None:
@@ -356,7 +378,7 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
             workspace_ctx = req.workspace_context
             if workspace_ctx:
                 span = trace.span("info_pipeline")
-                parts = _llm_info_answer_with_continuation(workspace_ctx, max_parts=3)
+                parts, metrics = _llm_info_answer_with_continuation_and_metrics(workspace_ctx, max_parts=3)
                 span.finish()
                 answer = "\n".join([p.replace("<CONTINUE>", "").replace("<END>", "") for p in parts]).strip()
             else:
@@ -375,7 +397,7 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
                     span.finish()
                     span = trace.span("info_pipeline")
                     repo_ctx = _build_repo_context_bundle(user_text, Path(STATE["repo_root"]), STATE["indexer"])
-                    parts = _llm_info_answer_with_continuation(repo_ctx, max_parts=3)
+                    parts, metrics = _llm_info_answer_with_continuation_and_metrics(repo_ctx, max_parts=3)
                     span.finish()
                     answer = "\n".join([p.replace("<CONTINUE>", "").replace("<END>", "") for p in parts]).strip()
         except Exception as exc:
@@ -385,6 +407,7 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
         "questions": result.questions,
         "plan": plan,
         "answer": answer,
+        "metrics": locals().get("metrics"),
         "trace": trace.to_dict(),
         "use_mcp": result.use_mcp,
         "mcp_server": result.mcp_server,
@@ -419,6 +442,46 @@ def _context_to_text(ctx: dict) -> str:
             if text:
                 parts.append(f"Snippet: {path}\n{text}")
     return "\n\n".join(parts)
+
+
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, len(text) // 4)
+
+
+def _trim_to_tokens(text: str, max_tokens: int) -> str:
+    if not text:
+        return text
+    max_chars = max_tokens * 4
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
+def _summarize_context_map_reduce(ctx: dict, max_tokens: int) -> str:
+    context_text = _context_to_text(ctx)
+    chunk_chars = max(4000, min(8000, max_tokens * 4 // 3))
+    chunks = [context_text[i:i + chunk_chars] for i in range(0, len(context_text), chunk_chars)]
+    # Limit number of chunks to avoid excessive calls
+    chunks = chunks[:6]
+    notes: list[str] = []
+    for idx, ch in enumerate(chunks, start=1):
+        prompt = (
+            "Summarize this codebase fragment into concise notes:\n"
+            "- purpose, entrypoints, key modules\n"
+            "- commands/scripts if present\n"
+            "- any ports or runtime notes\n\n"
+            f"Fragment {idx}:\n{ch}"
+        )
+        raw = llm_chat("reasoner", [
+            {"role": "system", "content": "You summarize codebase fragments into compact notes."},
+            {"role": "user", "content": prompt},
+        ], CONFIG, Path(STATE["repo_root"]), CONFIG_PATH)
+        notes.append(raw.strip())
+    combined = "\n\n".join(notes)
+    combined = _trim_to_tokens(combined, max_tokens)
+    return combined
 
 
 def _top_level_tree(repo_root: Path) -> list[dict]:
@@ -472,7 +535,8 @@ def _repo_signature(indexer: SymbolIndexer) -> str:
 
 def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolIndexer) -> dict:
     cfg = CONFIG.context_ingest
-    max_chars = max(40000, cfg.max_chars)
+    n_ctx = CONFIG.reasoner.context or 8192
+    max_chars = max(cfg.max_chars, int(n_ctx * 4 * 0.8))
     files: list[dict] = []
     seen: set[str] = set()
 
@@ -591,8 +655,17 @@ def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolI
     return context
 
 
-def _llm_info_answer_with_continuation(ctx: dict, max_parts: int = 3) -> list[str]:
+def _llm_info_answer_with_continuation_and_metrics(ctx: dict, max_parts: int = 3) -> tuple[list[str], dict]:
     context_text = _context_to_text(ctx)
+    n_ctx = CONFIG.reasoner.context or 8192
+    max_input_tokens = int(n_ctx * 0.7)
+    chunks_used = 0
+    if _estimate_tokens(context_text) > max_input_tokens:
+        context_text = _summarize_context_map_reduce(ctx, max_input_tokens)
+        chunks_used = 6
+    context_text = _trim_to_tokens(context_text, max_input_tokens)
+    if not chunks_used:
+        chunks_used = len(ctx.get("snippets") or [])
     extra_section = ""
     if bool(STATE.get("suggest_next_steps", True)):
         extra_section = "5) Next Steps / Improvements (short, actionable)\n"
@@ -620,7 +693,14 @@ def _llm_info_answer_with_continuation(ctx: dict, max_parts: int = 3) -> list[st
             {"role": "user", "content": "Continue."},
         ], CONFIG, Path(STATE["repo_root"]), CONFIG_PATH)
         parts.append(raw)
-    return parts
+    output_text = "\n".join(parts)
+    metrics = {
+        "input_tokens": _estimate_tokens(context_text),
+        "output_tokens": _estimate_tokens(output_text),
+        "chunks_retrieved": chunks_used,
+        "n_ctx": n_ctx,
+    }
+    return parts, metrics
 
 
 def _llm_continue_text(parts: list[str], max_parts: int = 3) -> list[str]:
@@ -657,6 +737,10 @@ def init(req: InitRequest):
                 repo.mkdir(parents=True, exist_ok=True)
         else:
             raise HTTPException(400, f"repo_root not found: {repo}")
+    # Idempotent init for same repo
+    if STATE.get("repo_root") == str(repo) and STATE.get("indexer") is not None and STATE.get("snapshots") is not None:
+        _start_indexer_thread()
+        return {"status":"ok", "repo_root": str(repo), "snapshots": STATE["snapshots"].list_snapshots()}
     snapshots = SnapshotCache(repo_root=repo, max_snapshots=4)
     staging = StagingArea(repo_root=repo, staging_root=repo / ".agent" / "staging")
     indexer = SymbolIndexer(repo_root=repo, db_path=repo / ".agent" / "index.sqlite")
@@ -687,6 +771,22 @@ def init(req: InitRequest):
     store = AgentStateStore(repo_root=repo, session_id="default")
     store.ensure_session("main")
     STATE["state_store"] = store
+    # Load recent index events from disk (if any)
+    try:
+        path = _index_events_path()
+        if path and path.exists():
+            lines = path.read_text().splitlines()[-50:]
+            events = []
+            for line in lines:
+                try:
+                    events.append(json.loads(line))
+                except Exception:
+                    continue
+            STATE["index_events"] = events
+            if events:
+                STATE["index_event_id"] = max([e.get("id", 0) for e in events])
+    except Exception:
+        pass
     STATE["task_queue"] = TaskQueue(repo)
     if STATE.get("task_worker") is None or not STATE["task_worker"].is_alive():
         worker = TaskWorker(STATE["task_queue"], _handle_task)
@@ -716,11 +816,12 @@ def query_stream(req: QueryRequest):
             not result.get("answer") or len(result.get("answer") or "") > max_stream
         ):
             span = trace.span("llm_info_stream")
-            parts = _llm_info_answer_with_continuation(req.workspace_context, max_parts=3)
+            parts, metrics = _llm_info_answer_with_continuation_and_metrics(req.workspace_context, max_parts=3)
             span.finish()
             for part in parts:
                 clean = part.replace("<CONTINUE>", "").replace("<END>", "")
                 yield from _stream_text("answer", clean)
+            yield _sse_event("metrics", json.dumps(metrics))
         elif result.get("answer"):
             text = result["answer"]
             if "<CONTINUE>" in text or "<END>" in text or _needs_continuation(text, max_stream):
@@ -730,6 +831,8 @@ def query_stream(req: QueryRequest):
                     yield from _stream_text("answer", clean)
             else:
                 yield from _stream_text("answer", text)
+            if result.get("metrics"):
+                yield _sse_event("metrics", json.dumps(result["metrics"]))
         elif result.get("questions"):
             yield from _stream_text("questions", "\n".join(result["questions"]))
         elif result.get("plan"):
