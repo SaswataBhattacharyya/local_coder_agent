@@ -36,6 +36,26 @@ body {
   color: var(--muted);
 }
 
+.index-tag {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.index-tag.fresh {
+  color: #9ad1a0;
+  border-color: #24502c;
+}
+.index-tag.stale {
+  color: #f0b45f;
+  border-color: #5c3d1a;
+}
+.index-tag.running {
+  color: #86c5ff;
+  border-color: #24425c;
+}
+
 .controls {
   display: flex;
   gap: 8px;

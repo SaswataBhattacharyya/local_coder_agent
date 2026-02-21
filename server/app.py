@@ -11,6 +11,8 @@ import json
 import time
 import sqlite3
 import shutil
+import hashlib
+import threading
 
 class TraceSpan:
     def __init__(self, name: str) -> None:
@@ -188,6 +190,12 @@ STATE = {
     "task_queue": None,
     "task_worker": None,
     "suggest_next_steps": True,
+    "index_status": {"in_progress": False, "last_run_ts": 0.0, "last_duration_ms": 0.0, "last_error": ""},
+    "index_events": [],
+    "index_event_id": 0,
+    "index_thread": None,
+    "index_lock": threading.Lock(),
+    "index_sig": "",
 }
 
 
@@ -214,6 +222,79 @@ def _sse_event(event: str, data: str) -> str:
     lines = data.split("\n")
     payload = "".join([f"data: {line}\n" for line in lines])
     return f"event: {event}\n{payload}\n"
+
+
+def _record_index_event(text: str) -> None:
+    if not text:
+        return
+    events = STATE.get("index_events") or []
+    if events:
+        last = events[-1]
+        if last.get("text") == text and (time.time() - last.get("ts", 0)) < 15:
+            return
+    STATE["index_event_id"] += 1
+    evt = {"id": STATE["index_event_id"], "ts": time.time(), "text": text}
+    events.append(evt)
+    # keep last 50
+    if len(events) > 50:
+        events = events[-50:]
+    STATE["index_events"] = events
+
+
+def _update_index_sig() -> None:
+    try:
+        if STATE.get("indexer") is not None:
+            STATE["index_sig"] = _repo_signature(STATE["indexer"])
+    except Exception:
+        pass
+
+
+def _start_indexer_thread(interval: int = 10) -> None:
+    t = STATE.get("index_thread")
+    if t is not None and getattr(t, "is_alive", lambda: False)():
+        return
+
+    def loop() -> None:
+        while True:
+            time.sleep(interval)
+            repo_root = STATE.get("repo_root")
+            if not repo_root or ".agent_stateless" in str(repo_root):
+                continue
+            if STATE.get("indexer") is None:
+                continue
+            if STATE["index_status"]["in_progress"]:
+                continue
+            lock: threading.Lock = STATE["index_lock"]
+            acquired = lock.acquire(blocking=False)
+            if not acquired:
+                continue
+            STATE["index_status"]["in_progress"] = True
+            start = time.perf_counter()
+            _record_index_event("Indexing workspace…")
+            try:
+                STATE["indexer"].index_incremental()
+                sig = _repo_signature(STATE["indexer"])
+                changed = sig != (STATE.get("index_sig") or "")
+                STATE["index_sig"] = sig
+                if changed:
+                    _record_index_event("Updating repo map…")
+                    _build_repo_map(full=False)
+                    _record_index_event("Index updated.")
+                else:
+                    _record_index_event("Index up to date.")
+                STATE["index_status"]["last_error"] = ""
+            except Exception as exc:
+                STATE["index_status"]["last_error"] = str(exc)
+                _record_index_event(f"Index error: {exc}")
+            finally:
+                STATE["index_status"]["last_run_ts"] = time.time()
+                STATE["index_status"]["last_duration_ms"] = round((time.perf_counter() - start) * 1000.0, 2)
+                STATE["index_status"]["in_progress"] = False
+                lock.release()
+
+    thread = threading.Thread(target=loop, daemon=True)
+    STATE["index_thread"] = thread
+    thread.start()
 
 
 def _stream_text(event: str, text: str, chunk: int = 800):
@@ -275,9 +356,9 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
             workspace_ctx = req.workspace_context
             if workspace_ctx:
                 span = trace.span("info_pipeline")
-                info = generate_info_answer_from_context(workspace_ctx)
-                answer = info.render(include_next_steps=bool(STATE.get("suggest_next_steps", True)))
+                parts = _llm_info_answer_with_continuation(workspace_ctx, max_parts=3)
                 span.finish()
+                answer = "\n".join([p.replace("<CONTINUE>", "").replace("<END>", "") for p in parts]).strip()
             else:
                 repo_root = str(STATE["repo_root"])
                 if ".agent_stateless" in repo_root:
@@ -286,13 +367,17 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
                         "Enable 'sendContextBundle' or init with a real repo_root inside the VM."
                     )
                 else:
+                    span = trace.span("index_refresh")
+                    STATE["indexer"].index_incremental()
+                    span.finish()
                     span = trace.span("repomap_refresh")
-                    _ensure_repo_map()
+                    _build_repo_map(full=False)
                     span.finish()
                     span = trace.span("info_pipeline")
-                    info = generate_info_answer(Path(STATE["repo_root"]))
-                    answer = info.render(include_next_steps=bool(STATE.get("suggest_next_steps", True)))
+                    repo_ctx = _build_repo_context_bundle(user_text, Path(STATE["repo_root"]), STATE["indexer"])
+                    parts = _llm_info_answer_with_continuation(repo_ctx, max_parts=3)
                     span.finish()
+                    answer = "\n".join([p.replace("<CONTINUE>", "").replace("<END>", "") for p in parts]).strip()
         except Exception as exc:
             answer = f"Unable to generate summary: {exc}"
     return {
@@ -326,7 +411,184 @@ def _context_to_text(ctx: dict) -> str:
     scripts = ctx.get("packageScripts") or {}
     if scripts:
         parts.append("package.json scripts:\n" + "\n".join([f"{k}: {v}" for k, v in scripts.items()]))
+    snippets = ctx.get("snippets") or []
+    if snippets:
+        for snip in snippets:
+            path = snip.get("path", "context")
+            text = snip.get("text", "")
+            if text:
+                parts.append(f"Snippet: {path}\n{text}")
     return "\n\n".join(parts)
+
+
+def _top_level_tree(repo_root: Path) -> list[dict]:
+    items = []
+    try:
+        for p in sorted(repo_root.iterdir()):
+            if p.name.startswith("."):
+                continue
+            items.append({"name": p.name})
+    except Exception:
+        pass
+    return items
+
+
+def _find_readme(repo_root: Path) -> Path | None:
+    for p in sorted(repo_root.iterdir()):
+        if p.is_file() and p.name.lower().startswith("readme"):
+            return p
+    return None
+
+
+def _read_file_snippet(path: Path, max_chars: int = 8000) -> str:
+    try:
+        return path.read_text(errors="ignore")[:max_chars]
+    except Exception:
+        return ""
+
+
+def _load_repo_map() -> dict | None:
+    store: AgentStateStore | None = STATE.get("state_store")
+    if not store:
+        return None
+    repo_map_path = store.branch_root(store.get_active_branch()) / "repo_map" / "repo_map.json"
+    if not repo_map_path.exists():
+        return None
+    try:
+        return json.loads(repo_map_path.read_text())
+    except Exception:
+        return None
+
+
+def _repo_signature(indexer: SymbolIndexer) -> str:
+    indexer.init_db()
+    con = sqlite3.connect(indexer.db_path)
+    cur = con.cursor()
+    rows = cur.execute("SELECT path, mtime FROM files ORDER BY path").fetchall()
+    con.close()
+    payload = "\n".join([f"{p}:{m}" for p, m in rows])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolIndexer) -> dict:
+    cfg = CONFIG.context_ingest
+    max_chars = max(40000, cfg.max_chars)
+    files: list[dict] = []
+    seen: set[str] = set()
+
+    readme = _find_readme(repo_root)
+    if readme:
+        content = _read_file_snippet(readme, max_chars=12000)
+        files.append({"path": str(readme.relative_to(repo_root)), "content": content})
+        seen.add(str(readme.relative_to(repo_root)))
+
+    pkg_path = repo_root / "package.json"
+    package_scripts = {}
+    if pkg_path.exists():
+        pkg_text = _read_file_snippet(pkg_path, max_chars=12000)
+        files.append({"path": "package.json", "content": pkg_text})
+        seen.add("package.json")
+        try:
+            data = json.loads(pkg_text)
+            package_scripts = data.get("scripts") or {}
+        except Exception:
+            package_scripts = {}
+
+    for fname in ["pyproject.toml", "requirements.txt", "Pipfile", "Cargo.toml", "go.mod", "Makefile", "docker-compose.yml", "docker-compose.yaml", "vite.config.ts", "next.config.js"]:
+        path = repo_root / fname
+        if path.exists() and path.is_file() and fname not in seen:
+            files.append({"path": fname, "content": _read_file_snippet(path, max_chars=6000)})
+            seen.add(fname)
+
+    # Entry points
+    for path in [
+        repo_root / "index.html",
+        repo_root / "src" / "main.ts",
+        repo_root / "src" / "main.tsx",
+        repo_root / "src" / "main.js",
+        repo_root / "src" / "main.jsx",
+        repo_root / "src" / "App.tsx",
+        repo_root / "src" / "App.ts",
+        repo_root / "src" / "App.jsx",
+        repo_root / "src" / "App.js",
+    ]:
+        rel = str(path.relative_to(repo_root)) if path.exists() else ""
+        if rel and rel not in seen:
+            files.append({"path": rel, "content": _read_file_snippet(path, max_chars=8000)})
+            seen.add(rel)
+
+    repo_map = _load_repo_map() or {}
+    top_modules = repo_map.get("top_modules") or []
+    for mod in top_modules[:12]:
+        path = mod.get("path")
+        if not path or path in seen:
+            continue
+        full = repo_root / path
+        if full.exists() and full.is_file():
+            files.append({"path": path, "content": _read_file_snippet(full, max_chars=8000)})
+            seen.add(path)
+
+    # If still small, add a few indexed files
+    try:
+        con = sqlite3.connect(indexer.db_path)
+        cur = con.cursor()
+        rows = cur.execute("SELECT path FROM files LIMIT 40").fetchall()
+        con.close()
+        for (path,) in rows:
+            if path in seen:
+                continue
+            full = repo_root / path
+            if full.exists() and full.is_file():
+                files.append({"path": path, "content": _read_file_snippet(full, max_chars=4000)})
+                seen.add(path)
+            if len(files) >= 25:
+                break
+    except Exception:
+        pass
+
+    # Trim total chars
+    total = 0
+    trimmed = []
+    for f in files:
+        content = f.get("content") or ""
+        if total + len(content) > max_chars:
+            remaining = max(0, max_chars - total)
+            f = dict(f)
+            f["content"] = content[:remaining]
+        total += len(f.get("content") or "")
+        trimmed.append(f)
+        if total >= max_chars:
+            break
+
+    context = {
+        "workspaceName": repo_root.name,
+        "tree": _top_level_tree(repo_root),
+        "files": trimmed,
+        "packageScripts": package_scripts,
+        "snippets": [],
+    }
+
+    if cfg.enabled:
+        store = RLMVarStore(repo_root=repo_root)
+        signature = _repo_signature(indexer)
+        cached_sig = store.load().get("repo_sig")
+        if cached_sig != signature:
+            joined = "\n\n".join([f"[File] {f['path']}\n{f.get('content','')}" for f in trimmed])
+            result = ingest_and_store(
+                joined,
+                query=user_text,
+                store=store,
+                chunk_size=cfg.chunk_size,
+                chunk_overlap=cfg.chunk_overlap,
+                top_k=cfg.top_k,
+            )
+            store.set("repo_sig", signature)
+            context["snippets"] = [{"path": "ingest", "text": ch} for ch in result.top_chunks]
+        else:
+            top_chunks = store.load().get("context_chunks", [])[: cfg.top_k]
+            context["snippets"] = [{"path": "ingest", "text": ch} for ch in top_chunks]
+
+    return context
 
 
 def _llm_info_answer_with_continuation(ctx: dict, max_parts: int = 3) -> list[str]:
@@ -404,6 +666,10 @@ def init(req: InitRequest):
         indexer.index_incremental()
     else:
         indexer.index_all()
+    try:
+        STATE["index_sig"] = _repo_signature(indexer)
+    except Exception:
+        STATE["index_sig"] = ""
 
     STATE.update(repo_root=str(repo), snapshots=snapshots, staging=staging, indexer=indexer, pending_diff=None, dep_graph=dep_graph)
     STATE["session"] = AgentSession(state=AgentState.IDLE)
@@ -426,6 +692,7 @@ def init(req: InitRequest):
         worker = TaskWorker(STATE["task_queue"], _handle_task)
         worker.start()
         STATE["task_worker"] = worker
+    _start_indexer_thread()
     return {"status":"ok", "repo_root": str(repo), "snapshots": snapshots.list_snapshots()}
 
 @app.post("/query")
@@ -969,6 +1236,7 @@ def _apply_approve(unified_diff: str, message: str | None) -> dict:
     message = message or "Approved change"
     # Re-index (MVP full re-index; later incremental)
     STATE["indexer"].index_all()
+    _update_index_sig()
     # Clear pending context + reset RLM vars
     STATE["pending_diff"] = None
     STATE["pending_summary"] = ""
@@ -1026,6 +1294,7 @@ def approve_stream(req: ApproveRequest):
             yield _sse_event("status", "reindexing")
             span = trace.span("reindex")
             STATE["indexer"].index_all()
+            _update_index_sig()
             span.finish()
             yield _sse_event("status", "snapshotting")
             span = trace.span("snapshot")
@@ -1098,6 +1367,7 @@ def snapshots_restore(req: SnapshotRestoreRequest):
         raise HTTPException(400, "init first")
     STATE["snapshots"].restore(req.snapshot_id)
     STATE["indexer"].index_all()
+    _update_index_sig()
     STATE["pending_diff"] = None
     STATE["pending_summary"] = ""
     STATE["pending_risk"] = ""
@@ -1131,6 +1401,7 @@ def revert(req: RevertRequest):
     except Exception as exc:
         raise HTTPException(400, f"snapshot not found: {exc}")
     STATE["indexer"].index_all()
+    _update_index_sig()
     STATE["pending_diff"] = None
     STATE["pending_summary"] = ""
     STATE["pending_risk"] = ""
@@ -1445,6 +1716,29 @@ def mcp_status():
         "repo_root": STATE.get("repo_root"),
         "servers": list(MCP_REGISTRY.load().keys()) if MCP_REGISTRY.config_path.exists() else [],
         "config_path": str(MCP_REGISTRY.config_path),
+    }
+
+
+@app.get("/index/status")
+def index_status(after_id: int = 0):
+    status = STATE.get("index_status") or {}
+    now = time.time()
+    last = status.get("last_run_ts", 0.0) or 0.0
+    interval = 10
+    if last <= 0:
+        freshness = "unknown"
+    elif now - last > interval * 2:
+        freshness = "stale"
+    else:
+        freshness = "fresh"
+    events = [e for e in (STATE.get("index_events") or []) if e.get("id", 0) > after_id]
+    return {
+        "in_progress": bool(status.get("in_progress", False)),
+        "last_run_ts": last,
+        "last_duration_ms": status.get("last_duration_ms", 0.0),
+        "last_error": status.get("last_error", ""),
+        "freshness": freshness,
+        "events": events,
     }
 
 @app.post("/mcp/list_tools")

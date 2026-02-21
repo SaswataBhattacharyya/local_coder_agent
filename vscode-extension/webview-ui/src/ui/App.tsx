@@ -15,6 +15,13 @@ type AgentState = {
   snapshotsText: string;
   ingestStatusText: string;
   progress?: { text: string; status: "running" | "done" | "error" }[];
+  indexStatus?: {
+    in_progress?: boolean;
+    last_run_ts?: number;
+    last_duration_ms?: number;
+    last_error?: string;
+    freshness?: string;
+  };
 };
 
 type ImagePreview = { name: string; data: string };
@@ -236,11 +243,21 @@ export const App: React.FC = () => {
     }
   })();
 
+  const indexLabel = state.indexStatus?.in_progress
+    ? "Indexing"
+    : state.indexStatus?.freshness || "unknown";
+  const indexClass = state.indexStatus?.in_progress
+    ? "running"
+    : state.indexStatus?.freshness === "stale"
+    ? "stale"
+    : "fresh";
+
   return (
     <div className="app">
       <div className="topbar">
         <div className="status">Status: {state.status}</div>
         <div className="status">Server: {state.serverUrl}</div>
+        <div className={`index-tag ${indexClass}`}>Index: {indexLabel}</div>
         <div className="controls">
           <button onClick={() => runAction("ping")}>Ping</button>
           <button onClick={() => setPanel(panel === "settings" ? "none" : "settings")}>Settings</button>
