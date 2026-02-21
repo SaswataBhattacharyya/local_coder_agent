@@ -1370,7 +1370,7 @@ def remove_model(req: ModelRemoveRequest):
         path = Path(APP_ROOT / "models" / model_dir)
         if path.exists() and path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
-    return {"status": "ok", "removed": [o.get(\"id\") for o in removed]}
+    return {"status": "ok", "removed": [o.get("id") for o in removed]}
 
 class RunCommandRequest(BaseModel):
     command: str
