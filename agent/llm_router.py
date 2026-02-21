@@ -28,6 +28,8 @@ def chat(role: str, messages: List[Dict[str, str]], config, repo_root: Path, con
             rlm_max_depth=getattr(config.runtime, "rlm_max_depth", 1),
             rlm_max_iterations=getattr(config.runtime, "rlm_max_iterations", 30),
             repo_root=repo_root,
+            rlm_environment=getattr(config.runtime, "rlm_environment", "local"),
+            rlm_environment_kwargs=getattr(config.runtime, "rlm_environment_kwargs", None),
         )
         return runtime.chat(messages)
     if model.provider == "openai":

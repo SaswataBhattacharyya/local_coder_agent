@@ -25,6 +25,8 @@ class RLMChatRuntime:
     rlm_max_depth: int = 1
     rlm_max_iterations: int = 30
     repo_root: Path | None = None
+    rlm_environment: str = "local"
+    rlm_environment_kwargs: Dict[str, Any] | None = None
 
     def _load_model_path(self) -> Path:
         return find_gguf_model(self.model_dir, self.filename_hint)
@@ -71,6 +73,10 @@ class RLMChatRuntime:
                     "max_depth": self.rlm_max_depth,
                     "max_iterations": self.rlm_max_iterations,
                 }
+                if self.rlm_environment:
+                    rlm_kwargs["environment"] = self.rlm_environment
+                if self.rlm_environment_kwargs:
+                    rlm_kwargs["environment_kwargs"] = self.rlm_environment_kwargs
                 backend_kwargs = self._build_backend_kwargs()
                 if backend_kwargs:
                     rlm_kwargs["backend_kwargs"] = backend_kwargs

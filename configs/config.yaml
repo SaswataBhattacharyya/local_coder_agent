@@ -47,6 +47,8 @@ runtime:
   rlm_backend_url: ""
   rlm_backend_model: ""
   rlm_backend_api_key: ""
+  rlm_environment: local
+  rlm_environment_kwargs: {}
   rlm_max_depth: 1
   rlm_max_iterations: 30
   multi_step_edits: true

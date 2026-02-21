@@ -187,7 +187,26 @@ STATE = {
     "dep_graph": None,
     "task_queue": None,
     "task_worker": None,
+    "suggest_next_steps": True,
 }
+
+
+def _update_next_steps_flag(user_text: str) -> None:
+    text = (user_text or "").lower()
+    stop_tokens = [
+        "stop suggestions", "disable suggestions", "turn off suggestions", "no suggestions",
+        "stop next steps", "disable next steps", "turn off next steps",
+        "stop improvements", "disable improvements", "turn off improvements",
+    ]
+    enable_tokens = [
+        "enable suggestions", "turn on suggestions", "resume suggestions",
+        "enable next steps", "turn on next steps", "resume next steps",
+        "enable improvements", "turn on improvements", "resume improvements",
+    ]
+    if any(t in text for t in stop_tokens):
+        STATE["suggest_next_steps"] = False
+    elif any(t in text for t in enable_tokens):
+        STATE["suggest_next_steps"] = True
 
 
 def _sse_event(event: str, data: str) -> str:
@@ -207,6 +226,7 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
         raise HTTPException(400, "init first")
     images = req.images or []
     user_text = req.user_text
+    _update_next_steps_flag(user_text)
     if images:
         try:
             span = trace.span("vlm_analyze")
@@ -256,7 +276,7 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
             if workspace_ctx:
                 span = trace.span("info_pipeline")
                 info = generate_info_answer_from_context(workspace_ctx)
-                answer = info.render()
+                answer = info.render(include_next_steps=bool(STATE.get("suggest_next_steps", True)))
                 span.finish()
             else:
                 repo_root = str(STATE["repo_root"])
@@ -271,7 +291,7 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
                     span.finish()
                     span = trace.span("info_pipeline")
                     info = generate_info_answer(Path(STATE["repo_root"]))
-                    answer = info.render()
+                    answer = info.render(include_next_steps=bool(STATE.get("suggest_next_steps", True)))
                     span.finish()
         except Exception as exc:
             answer = f"Unable to generate summary: {exc}"
@@ -311,13 +331,17 @@ def _context_to_text(ctx: dict) -> str:
 
 def _llm_info_answer_with_continuation(ctx: dict, max_parts: int = 3) -> list[str]:
     context_text = _context_to_text(ctx)
+    extra_section = ""
+    if bool(STATE.get("suggest_next_steps", True)):
+        extra_section = "5) Next Steps / Improvements (short, actionable)\n"
     base_prompt = (
         "You are summarizing a codebase from partial context. "
         "Write a crisp but descriptive answer with these sections:\n"
         "1) Project Summary\n"
         "2) How to Start (2-3 likely commands)\n"
         "3) Prerequisites/Notes\n"
-        "4) Ports (if found)\n\n"
+        "4) Ports (if found)\n"
+        f"{extra_section}\n"
         "If you are not finished, end with <CONTINUE>. If complete, end with <END>.\n\n"
         f"Context:\n{context_text}"
     )

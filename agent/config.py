@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
 
@@ -26,6 +26,8 @@ class RuntimeCfg:
     rlm_backend_url: str = ""
     rlm_backend_model: str = ""
     rlm_backend_api_key: str = ""
+    rlm_environment: str = "local"
+    rlm_environment_kwargs: dict = field(default_factory=dict)
     rlm_max_depth: int = 1
     rlm_max_iterations: int = 30
     multi_step_edits: bool = True

@@ -20,8 +20,9 @@ class InfoAnswer:
     start_commands: List[str]
     notes: List[str]
     ports: List[str]
+    next_steps: List[str]
 
-    def render(self) -> str:
+    def render(self, include_next_steps: bool = True) -> str:
         parts: List[str] = []
         parts.append("Project Summary:")
         parts.append(f"- {self.summary}")
@@ -46,6 +47,14 @@ class InfoAnswer:
                 parts.append(f"- {port}")
         else:
             parts.append("- None detected.")
+        if include_next_steps:
+            parts.append("")
+            parts.append("Next Steps / Improvements:")
+            if self.next_steps:
+                for step in self.next_steps:
+                    parts.append(f"- {step}")
+            else:
+                parts.append("- Add or expand automated tests.")
         return "\n".join(parts).strip()
 
 
@@ -55,9 +64,10 @@ def generate_info_answer(repo_root: Path) -> InfoAnswer:
     start_cmds = _detect_start_commands(repo_root, readme_text)
     notes = _detect_notes(repo_root, readme_text)
     ports = _detect_ports(readme_text, repo_root)
+    next_steps = _detect_next_steps(repo_root, readme_text)
     if readme_path:
         notes.insert(0, f"Summary based on {readme_path.name}.")
-    return InfoAnswer(summary=summary, start_commands=start_cmds, notes=notes, ports=ports)
+    return InfoAnswer(summary=summary, start_commands=start_cmds, notes=notes, ports=ports, next_steps=next_steps)
 
 
 def generate_info_answer_from_context(ctx: Dict[str, Any]) -> InfoAnswer:
@@ -68,9 +78,83 @@ def generate_info_answer_from_context(ctx: Dict[str, Any]) -> InfoAnswer:
     start_cmds = _detect_start_commands_from_context(ctx, readme_text, pkg_text)
     notes = _detect_notes_from_context(ctx, readme_text, pkg_text)
     ports = _detect_ports(readme_text, Path("."))
+    next_steps = _detect_next_steps_from_context(ctx, readme_text, pkg_text)
     ws_name = ctx.get("workspaceName") or "workspace"
     notes.insert(0, f"Summary based on local workspace: {ws_name}.")
-    return InfoAnswer(summary=summary, start_commands=start_cmds, notes=notes, ports=ports)
+    return InfoAnswer(summary=summary, start_commands=start_cmds, notes=notes, ports=ports, next_steps=next_steps)
+
+
+def _detect_next_steps(repo_root: Path, readme_text: str | None) -> List[str]:
+    steps: List[str] = []
+    pkg = repo_root / "package.json"
+    if pkg.exists():
+        steps.extend(_detect_next_steps_from_package(pkg))
+    if readme_text and "TODO" in readme_text.upper():
+        steps.append("Review README TODOs and create a short roadmap.")
+    if (repo_root / "docker-compose.yml").exists() or (repo_root / "docker-compose.yaml").exists():
+        steps.append("Document Docker usage and environment variables.")
+    return _dedupe_steps(steps)
+
+
+def _detect_next_steps_from_context(ctx: Dict[str, Any], readme_text: str | None, pkg_text: str | None) -> List[str]:
+    steps: List[str] = []
+    scripts = ctx.get("packageScripts") or {}
+    if not scripts and pkg_text:
+        try:
+            data = json.loads(pkg_text)
+            scripts = data.get("scripts") or {}
+        except Exception:
+            scripts = {}
+    if isinstance(scripts, dict) and scripts:
+        tool = _detect_tool_from_context(ctx)
+        steps.extend(_detect_next_steps_from_scripts(scripts, tool))
+    if readme_text and "TODO" in readme_text.upper():
+        steps.append("Review README TODOs and create a short roadmap.")
+    tree = ctx.get("tree") or []
+    names = {t.get("name") for t in tree if isinstance(t, dict)}
+    if "docker-compose.yml" in names or "docker-compose.yaml" in names:
+        steps.append("Document Docker usage and environment variables.")
+    return _dedupe_steps(steps)
+
+
+def _detect_next_steps_from_package(pkg: Path) -> List[str]:
+    try:
+        data = json.loads(pkg.read_text(errors="ignore"))
+    except Exception:
+        return []
+    scripts = data.get("scripts") or {}
+    if not isinstance(scripts, dict):
+        return []
+    tool = "npm"
+    lock = pkg.parent / "pnpm-lock.yaml"
+    if lock.exists():
+        tool = "pnpm"
+    elif (pkg.parent / "yarn.lock").exists():
+        tool = "yarn"
+    elif (pkg.parent / "bun.lockb").exists():
+        tool = "bun"
+    return _detect_next_steps_from_scripts(scripts, tool)
+
+
+def _detect_next_steps_from_scripts(scripts: Dict[str, str], tool: str) -> List[str]:
+    steps: List[str] = []
+    if "test" in scripts:
+        steps.append(f"{tool} run test")
+    if "lint" in scripts:
+        steps.append(f"{tool} run lint")
+    if "build" in scripts:
+        steps.append(f"{tool} run build")
+    return steps
+
+
+def _dedupe_steps(steps: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for s in steps:
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:3]
 
 
 def _load_readme(repo_root: Path) -> Tuple[Path | None, str | None]:
