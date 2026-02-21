@@ -21,6 +21,16 @@ class RuntimeCfg:
     host: str = "0.0.0.0"
     port: int = 8010
     allow_shell: bool = False
+    use_rlm: bool = True
+    rlm_backend: str = "openai"
+    rlm_backend_url: str = ""
+    rlm_backend_model: str = ""
+    rlm_backend_api_key: str = ""
+    rlm_max_depth: int = 1
+    rlm_max_iterations: int = 30
+    multi_step_edits: bool = True
+    multi_step_max_files: int = 5
+    multi_step_max_passes: int = 2
 
 @dataclass
 class RestoreCfg:

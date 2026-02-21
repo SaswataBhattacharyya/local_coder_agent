@@ -20,6 +20,14 @@ def chat(role: str, messages: List[Dict[str, str]], config, repo_root: Path, con
             filename_hint=model.filename_hint or config.coder.filename_hint,
             n_ctx=model.context or config.coder.context,
             var_store=RLMVarStore(repo_root=repo_root),
+            use_rlm=getattr(config.runtime, "use_rlm", False),
+            rlm_backend=getattr(config.runtime, "rlm_backend", "openai"),
+            rlm_backend_url=getattr(config.runtime, "rlm_backend_url", ""),
+            rlm_backend_model=getattr(config.runtime, "rlm_backend_model", ""),
+            rlm_backend_api_key=getattr(config.runtime, "rlm_backend_api_key", ""),
+            rlm_max_depth=getattr(config.runtime, "rlm_max_depth", 1),
+            rlm_max_iterations=getattr(config.runtime, "rlm_max_iterations", 30),
+            repo_root=repo_root,
         )
         return runtime.chat(messages)
     if model.provider == "openai":

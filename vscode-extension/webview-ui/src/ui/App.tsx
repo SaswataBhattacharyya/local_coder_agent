@@ -42,7 +42,13 @@ export const App: React.FC = () => {
   const [showRemoveModel, setShowRemoveModel] = useState(false);
   const [removeRole, setRemoveRole] = useState("reasoner");
   const [removeIds, setRemoveIds] = useState<string[]>([]);
-  const [modelForm, setModelForm] = useState({ role: "reasoner", model_id: "", repo_id: "", filename_hint: "Q4_K_M" });
+  const [modelForm, setModelForm] = useState({
+    role: "reasoner",
+    model_id: "",
+    repo_id: "",
+    filename_hint: "Q4_K_M",
+    download_now: true,
+  });
 
   const diffFiles = useMemo<DiffFile[]>(() => {
     if (!state.pending?.diff) return [];
@@ -260,7 +266,7 @@ export const App: React.FC = () => {
               <div className="field">
                 <label>Reasoning Model</label>
                 <select
-                  value={(state.modelInfo?.reasoner?.selected === "best" ? (state.modelInfo?.reasoner?.default || "") : (state.modelInfo?.reasoner?.selected || ""))}
+                  value={state.modelInfo?.reasoner?.selected === "best" ? (state.modelInfo?.reasoner?.default || "") : (state.modelInfo?.reasoner?.selected || "")}
                   onChange={(e) => vscode?.postMessage({ type: "selectModel", role: "reasoner", modelId: e.target.value })}
                 >
                   {(state.modelInfo?.reasoner?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
@@ -271,7 +277,7 @@ export const App: React.FC = () => {
               <div className="field">
                 <label>Coding Model</label>
                 <select
-                  value={(state.modelInfo?.coder?.selected === "best" ? (state.modelInfo?.coder?.default || "") : (state.modelInfo?.coder?.selected || ""))}
+                  value={state.modelInfo?.coder?.selected === "best" ? (state.modelInfo?.coder?.default || "") : (state.modelInfo?.coder?.selected || "")}
                   onChange={(e) => vscode?.postMessage({ type: "selectModel", role: "coder", modelId: e.target.value })}
                 >
                   {(state.modelInfo?.coder?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
@@ -282,7 +288,7 @@ export const App: React.FC = () => {
               <div className="field">
                 <label>Image Model</label>
                 <select
-                  value={(state.modelInfo?.vlm?.selected === "best" ? (state.modelInfo?.vlm?.default || "") : (state.modelInfo?.vlm?.selected || ""))}
+                  value={state.modelInfo?.vlm?.selected === "best" ? (state.modelInfo?.vlm?.default || "") : (state.modelInfo?.vlm?.selected || "")}
                   onChange={(e) => vscode?.postMessage({ type: "selectModel", role: "vlm", modelId: e.target.value })}
                 >
                   {(state.modelInfo?.vlm?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
@@ -297,71 +303,7 @@ export const App: React.FC = () => {
                   <option>No plugins installed</option>
                 </select>
               </div>
-            
-          {showAddModel && (
-            <div className="modal">
-              <div className="modal-card">
-                <h3>Add Model</h3>
-                <div className="field">
-                  <label>Type</label>
-                  <select
-                    value={modelForm.role}
-                    onChange={(e) => setModelForm({ ...modelForm, role: e.target.value })}
-                  >
-                    <option value="reasoner">Reasoning</option>
-                    <option value="coder">Coder</option>
-                    <option value="vlm">Image</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Model Name</label>
-                  <input
-                    value={modelForm.model_id}
-                    onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })}
-                    placeholder="e.g. my-qwen-model"
-                  />
-                </div>
-                <div className="field">
-                  <label>Model Link (HuggingFace repo)</label>
-                  <input
-                    value={modelForm.repo_id}
-                    onChange={(e) => setModelForm({ ...modelForm, repo_id: e.target.value })}
-                    placeholder="org/model-repo"
-                  />
-                </div>
-                <div className="field">
-                  <label>Filename Hint</label>
-                  <input
-                    value={modelForm.filename_hint}
-                    onChange={(e) => setModelForm({ ...modelForm, filename_hint: e.target.value })}
-                    placeholder="Q4_K_M"
-                  />
-                </div>
-                <div className="field">
-                  <label>Download</label>
-                  <select
-                    value={modelForm.download_now ? "now" : "later"}
-                    onChange={(e) => setModelForm({ ...modelForm, download_now: e.target.value === "now" })}
-                  >
-                    <option value="now">Download now</option>
-                    <option value="later">Download later</option>
-                  </select>
-                </div>
-                <div className="row">
-                  <button onClick={() => setShowAddModel(false)}>Cancel</button>
-                  <button
-                    onClick={() => {
-                      vscode?.postMessage({ type: "action", action: "addModel", ...modelForm, download_now: true });
-                      setShowAddModel(false);
-                    }}
-                  >
-                    Add
-                  </button>
-                </div>
-              </div>
             </div>
-          )}
-</div>
           )}
 
           {panel === "mcp" && (
@@ -381,71 +323,7 @@ export const App: React.FC = () => {
                   )}
                 </div>
               )}
-            
-          {showAddModel && (
-            <div className="modal">
-              <div className="modal-card">
-                <h3>Add Model</h3>
-                <div className="field">
-                  <label>Type</label>
-                  <select
-                    value={modelForm.role}
-                    onChange={(e) => setModelForm({ ...modelForm, role: e.target.value })}
-                  >
-                    <option value="reasoner">Reasoning</option>
-                    <option value="coder">Coder</option>
-                    <option value="vlm">Image</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Model Name</label>
-                  <input
-                    value={modelForm.model_id}
-                    onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })}
-                    placeholder="e.g. my-qwen-model"
-                  />
-                </div>
-                <div className="field">
-                  <label>Model Link (HuggingFace repo)</label>
-                  <input
-                    value={modelForm.repo_id}
-                    onChange={(e) => setModelForm({ ...modelForm, repo_id: e.target.value })}
-                    placeholder="org/model-repo"
-                  />
-                </div>
-                <div className="field">
-                  <label>Filename Hint</label>
-                  <input
-                    value={modelForm.filename_hint}
-                    onChange={(e) => setModelForm({ ...modelForm, filename_hint: e.target.value })}
-                    placeholder="Q4_K_M"
-                  />
-                </div>
-                <div className="field">
-                  <label>Download</label>
-                  <select
-                    value={modelForm.download_now ? "now" : "later"}
-                    onChange={(e) => setModelForm({ ...modelForm, download_now: e.target.value === "now" })}
-                  >
-                    <option value="now">Download now</option>
-                    <option value="later">Download later</option>
-                  </select>
-                </div>
-                <div className="row">
-                  <button onClick={() => setShowAddModel(false)}>Cancel</button>
-                  <button
-                    onClick={() => {
-                      vscode?.postMessage({ type: "action", action: "addModel", ...modelForm, download_now: true });
-                      setShowAddModel(false);
-                    }}
-                  >
-                    Add
-                  </button>
-                </div>
-              </div>
             </div>
-          )}
-</div>
           )}
 
           {panel === "history" && (
@@ -466,119 +344,10 @@ export const App: React.FC = () => {
               ) : (
                 <div className="muted">No snapshots yet.</div>
               )}
-            
-          {showAddModel && (
-            <div className="modal">
-              <div className="modal-card">
-                <h3>Add Model</h3>
-                <div className="field">
-                  <label>Type</label>
-                  <select
-                    value={modelForm.role}
-                    onChange={(e) => setModelForm({ ...modelForm, role: e.target.value })}
-                  >
-                    <option value="reasoner">Reasoning</option>
-                    <option value="coder">Coder</option>
-                    <option value="vlm">Image</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Model Name</label>
-                  <input
-                    value={modelForm.model_id}
-                    onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })}
-                    placeholder="e.g. my-qwen-model"
-                  />
-                </div>
-                <div className="field">
-                  <label>Model Link (HuggingFace repo)</label>
-                  <input
-                    value={modelForm.repo_id}
-                    onChange={(e) => setModelForm({ ...modelForm, repo_id: e.target.value })}
-                    placeholder="org/model-repo"
-                  />
-                </div>
-                <div className="field">
-                  <label>Filename Hint</label>
-                  <input
-                    value={modelForm.filename_hint}
-                    onChange={(e) => setModelForm({ ...modelForm, filename_hint: e.target.value })}
-                    placeholder="Q4_K_M"
-                  />
-                </div>
-                <div className="field">
-                  <label>Download</label>
-                  <select
-                    value={modelForm.download_now ? "now" : "later"}
-                    onChange={(e) => setModelForm({ ...modelForm, download_now: e.target.value === "now" })}
-                  >
-                    <option value="now">Download now</option>
-                    <option value="later">Download later</option>
-                  </select>
-                </div>
-                <div className="row">
-                  <button onClick={() => setShowAddModel(false)}>Cancel</button>
-                  <button
-                    onClick={() => {
-                      vscode?.postMessage({ type: "action", action: "addModel", ...modelForm, download_now: true });
-                      setShowAddModel(false);
-                    }}
-                  >
-                    Add
-                  </button>
-                </div>
-              </div>
             </div>
-          )}
-</div>
           )}
         </div>
       )}
-
-          {showRemoveModel && (
-            <div className="modal modal-remove">
-              <div className="modal-card">
-                <h3>Remove Models</h3>
-                <div className="field">
-                  <label>Type</label>
-                  <select value={removeRole} onChange={(e) => { setRemoveRole(e.target.value); setRemoveIds([]); }}>
-                    <option value="reasoner">Reasoning</option>
-                    <option value="coder">Coder</option>
-                    <option value="vlm">Image</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Models</label>
-                  <div className="checkbox-list">
-                    {(state.modelInfo?.[removeRole]?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
-                      <label key={opt.id} className="checkbox-item">
-                        <input
-                          type="checkbox"
-                          checked={removeIds.includes(opt.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) setRemoveIds([...removeIds, opt.id]);
-                            else setRemoveIds(removeIds.filter((id) => id !== opt.id));
-                          }}
-                        />
-                        <span>{opt.label}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div className="row">
-                  <button onClick={() => setShowRemoveModel(false)}>Cancel</button>
-                  <button
-                    onClick={() => {
-                      vscode?.postMessage({ type: "action", action: "removeModel", role: removeRole, model_ids: removeIds });
-                      setShowRemoveModel(false);
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
 
       <div className="chat-area">
         {state.progress && state.progress.length > 0 && (
@@ -666,50 +435,114 @@ export const App: React.FC = () => {
         </div>
       )}
 
-          {showRemoveModel && (
-            <div className="modal modal-remove">
-              <div className="modal-card">
-                <h3>Remove Models</h3>
-                <div className="field">
-                  <label>Type</label>
-                  <select value={removeRole} onChange={(e) => { setRemoveRole(e.target.value); setRemoveIds([]); }}>
-                    <option value="reasoner">Reasoning</option>
-                    <option value="coder">Coder</option>
-                    <option value="vlm">Image</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Models</label>
-                  <div className="checkbox-list">
-                    {(state.modelInfo?.[removeRole]?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
-                      <label key={opt.id} className="checkbox-item">
-                        <input
-                          type="checkbox"
-                          checked={removeIds.includes(opt.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) setRemoveIds([...removeIds, opt.id]);
-                            else setRemoveIds(removeIds.filter((id) => id !== opt.id));
-                          }}
-                        />
-                        <span>{opt.label}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-                <div className="row">
-                  <button onClick={() => setShowRemoveModel(false)}>Cancel</button>
-                  <button
-                    onClick={() => {
-                      vscode?.postMessage({ type: "action", action: "removeModel", role: removeRole, model_ids: removeIds });
-                      setShowRemoveModel(false);
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
+      {showAddModel && (
+        <div className="modal">
+          <div className="modal-card">
+            <h3>Add Model</h3>
+            <div className="field">
+              <label>Type</label>
+              <select
+                value={modelForm.role}
+                onChange={(e) => setModelForm({ ...modelForm, role: e.target.value })}
+              >
+                <option value="reasoner">Reasoning</option>
+                <option value="coder">Coder</option>
+                <option value="vlm">Image</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Model Name</label>
+              <input
+                value={modelForm.model_id}
+                onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })}
+                placeholder="e.g. my-qwen-model"
+              />
+            </div>
+            <div className="field">
+              <label>Model Link (HuggingFace repo)</label>
+              <input
+                value={modelForm.repo_id}
+                onChange={(e) => setModelForm({ ...modelForm, repo_id: e.target.value })}
+                placeholder="org/model-repo"
+              />
+            </div>
+            <div className="field">
+              <label>Filename Hint</label>
+              <input
+                value={modelForm.filename_hint}
+                onChange={(e) => setModelForm({ ...modelForm, filename_hint: e.target.value })}
+                placeholder="Q4_K_M"
+              />
+            </div>
+            <div className="field">
+              <label>Download</label>
+              <select
+                value={modelForm.download_now ? "now" : "later"}
+                onChange={(e) => setModelForm({ ...modelForm, download_now: e.target.value === "now" })}
+              >
+                <option value="now">Download now</option>
+                <option value="later">Download later</option>
+              </select>
+            </div>
+            <div className="row">
+              <button onClick={() => setShowAddModel(false)}>Cancel</button>
+              <button
+                onClick={() => {
+                  vscode?.postMessage({ type: "action", action: "addModel", ...modelForm });
+                  setShowAddModel(false);
+                }}
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRemoveModel && (
+        <div className="modal modal-remove">
+          <div className="modal-card">
+            <h3>Remove Models</h3>
+            <div className="field">
+              <label>Type</label>
+              <select value={removeRole} onChange={(e) => { setRemoveRole(e.target.value); setRemoveIds([]); }}>
+                <option value="reasoner">Reasoning</option>
+                <option value="coder">Coder</option>
+                <option value="vlm">Image</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Models</label>
+              <div className="checkbox-list">
+                {(state.modelInfo?.[removeRole]?.options || []).filter((o: any) => o.id !== "best").map((opt: any) => (
+                  <label key={opt.id} className="checkbox-item">
+                    <input
+                      type="checkbox"
+                      checked={removeIds.includes(opt.id)}
+                      onChange={(e) => {
+                        if (e.target.checked) setRemoveIds([...removeIds, opt.id]);
+                        else setRemoveIds(removeIds.filter((id) => id !== opt.id));
+                      }}
+                    />
+                    <span>{opt.label}</span>
+                  </label>
+                ))}
               </div>
             </div>
-          )}
+            <div className="row">
+              <button onClick={() => setShowRemoveModel(false)}>Cancel</button>
+              <button
+                onClick={() => {
+                  vscode?.postMessage({ type: "action", action: "removeModel", role: removeRole, model_ids: removeIds });
+                  setShowRemoveModel(false);
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

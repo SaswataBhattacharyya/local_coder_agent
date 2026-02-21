@@ -10,3 +10,4 @@ huggingface_hub>=0.22.2
 llama-cpp-python>=0.2.74
 python-multipart>=0.0.9
 pytest>=8.2
+rlm @ git+https://github.com/alexzhang13/rlm.git
