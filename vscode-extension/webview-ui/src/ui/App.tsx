@@ -22,6 +22,9 @@ type AgentState = {
     last_error?: string;
     freshness?: string;
   };
+  repoRoot?: string;
+  repoRootStateless?: boolean;
+  repoRootRequested?: string;
 };
 
 type ImagePreview = { name: string; data: string };
@@ -367,6 +370,13 @@ export const App: React.FC = () => {
       )}
 
       <div className="chat-area">
+        {state.repoRootStateless && (
+          <div className="banner warning">
+            Workspace path not visible in VM. Mount/sync required. Current repo_root is stateless.
+            {state.repoRootRequested && <div className="muted">Requested: {state.repoRootRequested}</div>}
+            {state.repoRoot && <div className="muted">Current: {state.repoRoot}</div>}
+          </div>
+        )}
         {state.progress && state.progress.length > 0 && (
           <div className="system-messages">
             {state.progress.map((p, i) => (

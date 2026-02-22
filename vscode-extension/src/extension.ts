@@ -25,6 +25,9 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
   private indexStatus: any = null;
   private indexPoller: NodeJS.Timeout | null = null;
   private lastIndexEventId: number = 0;
+  private repoRoot: string = "";
+  private repoRootStateless: boolean = false;
+  private repoRootRequested: string = "";
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -60,7 +63,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.serverUrl = vscode.workspace.getConfiguration("localCodeAgent").get<string>("serverUrl", "");
-    const res = await this.api.post<{ status: string }>("/init", {
+    const res = await this.api.post<{ status: string; repo_root?: string; repo_root_stateless?: boolean; requested_repo_root?: string }>("/init", {
       repo_root: root,
       allow_missing_repo: true,
     });
@@ -70,6 +73,9 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.status = "Connected";
+    this.repoRoot = res.data.repo_root || "";
+    this.repoRootStateless = Boolean(res.data.repo_root_stateless);
+    this.repoRootRequested = res.data.requested_repo_root || root;
     await this.loadModels(false);
     await this.snapshotsRefresh();
     await this.refreshIndexStatus();
@@ -784,6 +790,9 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
         ingestStatusText: this.ingestStatusText,
         progress: this.progress,
         indexStatus: this.indexStatus,
+        repoRoot: this.repoRoot,
+        repoRootStateless: this.repoRootStateless,
+        repoRootRequested: this.repoRootRequested,
       });
     }
   }

@@ -196,6 +196,8 @@ STATE = {
     "index_thread": None,
     "index_lock": threading.Lock(),
     "index_sig": "",
+    "requested_repo_root": "",
+    "repo_root_stateless": False,
 }
 
 
@@ -330,6 +332,24 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
     images = req.images or []
     user_text = req.user_text
     _update_next_steps_flag(user_text)
+    if STATE.get("repo_root_stateless") and req.workspace_context and req.workspace_context.get("rootPath"):
+        return {
+            "state": "READY",
+            "questions": [],
+            "plan": [],
+            "answer": (
+                "Workspace path not visible in VM. Mount/sync required. "
+                "Current repo_root is stateless. Please mount the workspace into the VM "
+                "and re-run /init with that path."
+            ),
+            "trace": trace.to_dict(),
+            "use_mcp": False,
+            "mcp_server": None,
+            "intent": "INFO",
+            "needs_confirm": False,
+            "confirm_token": None,
+            "metrics": None,
+        }
     if images:
         try:
             span = trace.span("vlm_analyze")
@@ -726,6 +746,7 @@ def _needs_continuation(text: str, max_stream: int) -> bool:
 
 @app.post("/init")
 def init(req: InitRequest):
+    requested_root = req.repo_root
     repo = Path(req.repo_root).resolve()
     if not repo.exists():
         if req.allow_missing_repo:
@@ -737,10 +758,20 @@ def init(req: InitRequest):
                 repo.mkdir(parents=True, exist_ok=True)
         else:
             raise HTTPException(400, f"repo_root not found: {repo}")
+    stateless = ".agent_stateless" in str(repo)
+    STATE["requested_repo_root"] = requested_root
+    STATE["repo_root_stateless"] = stateless
     # Idempotent init for same repo
     if STATE.get("repo_root") == str(repo) and STATE.get("indexer") is not None and STATE.get("snapshots") is not None:
         _start_indexer_thread()
-        return {"status":"ok", "repo_root": str(repo), "snapshots": STATE["snapshots"].list_snapshots()}
+        return {
+            "status":"ok",
+            "repo_root": str(repo),
+            "snapshots": STATE["snapshots"].list_snapshots(),
+            "repo_root_visible": not stateless,
+            "repo_root_stateless": stateless,
+            "requested_repo_root": requested_root,
+        }
     snapshots = SnapshotCache(repo_root=repo, max_snapshots=4)
     staging = StagingArea(repo_root=repo, staging_root=repo / ".agent" / "staging")
     indexer = SymbolIndexer(repo_root=repo, db_path=repo / ".agent" / "index.sqlite")
@@ -793,7 +824,14 @@ def init(req: InitRequest):
         worker.start()
         STATE["task_worker"] = worker
     _start_indexer_thread()
-    return {"status":"ok", "repo_root": str(repo), "snapshots": snapshots.list_snapshots()}
+    return {
+        "status":"ok",
+        "repo_root": str(repo),
+        "snapshots": snapshots.list_snapshots(),
+        "repo_root_visible": not stateless,
+        "repo_root_stateless": stateless,
+        "requested_repo_root": requested_root,
+    }
 
 @app.post("/query")
 def query(req: QueryRequest, response: Response):
@@ -1842,6 +1880,9 @@ def index_status(after_id: int = 0):
         "last_error": status.get("last_error", ""),
         "freshness": freshness,
         "events": events,
+        "repo_root": STATE.get("repo_root"),
+        "repo_root_stateless": bool(STATE.get("repo_root_stateless", False)),
+        "requested_repo_root": STATE.get("requested_repo_root", ""),
     }
 
 @app.post("/mcp/list_tools")

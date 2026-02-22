@@ -26,7 +26,13 @@ export async function gatherContext(): Promise<ContextBundle> {
   if (query) {
     const tasks: Array<Thenable<void>> = [];
     const ws: any = vscode.workspace as any;
-    await ws.findTextInFiles({ pattern: query }, { maxResults: 20 }, (result: any) => {
+    await ws.findTextInFiles(
+      { pattern: query },
+      {
+        maxResults: 20,
+        filesToExclude: "**/{node_modules,.git,dist,build,.next,.vite,.cache,venv,.venv}/**",
+      },
+      (result: any) => {
       const docUri = result.uri;
       const start = Math.max(0, result.ranges[0].start.line - 4);
       const end = result.ranges[0].end.line + 4;
