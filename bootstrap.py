@@ -58,6 +58,19 @@ def ask_vram_gb() -> int:
         except ValueError:
             print("Please enter an integer.")
 
+def ask_inference_mode() -> str:
+    env_mode = os.getenv("LOCAL_CODE_AGENT_INFERENCE_MODE", "").strip().lower()
+    if env_mode in {"local", "remote", "mixed"}:
+        print(f"[OK] Inference mode from env: {env_mode}")
+        return env_mode
+    while True:
+        s = input("Inference mode? [local/remote/mixed] (default: local): ").strip().lower()
+        if not s:
+            return "local"
+        if s in {"local", "remote", "mixed"}:
+            return s
+        print("Please enter local, remote, or mixed.")
+
 def choose_quant_hint(vram_gb: int) -> str:
     # Simple heuristic:
     # - 0-8GB: Q4_K_M
@@ -86,6 +99,43 @@ def set_config_quant(hint: str) -> None:
                 opt["filename_hint"] = hint
     cfg.write_text(yaml.safe_dump(data, sort_keys=False))
 
+def set_inference_config(mode: str) -> None:
+    cfg = ROOT / "configs" / "config.yaml"
+    data = yaml.safe_load(cfg.read_text())
+    inference = data.get("inference", {}) or {}
+    inference["mode"] = mode
+    roles = inference.get("roles", {}) or {}
+
+    env = os.environ
+    role_env = {
+        "reasoner": ("LOCAL_CODE_AGENT_REASONER_URL", "LOCAL_CODE_AGENT_REASONER_MODEL"),
+        "coder": ("LOCAL_CODE_AGENT_CODER_URL", "LOCAL_CODE_AGENT_CODER_MODEL"),
+        "vlm": ("LOCAL_CODE_AGENT_VLM_URL", "LOCAL_CODE_AGENT_VLM_MODEL"),
+    }
+    for role, (url_key, model_key) in role_env.items():
+        role_cfg = roles.get(role, {}) or {}
+        remote_url = env.get(url_key, role_cfg.get("remote_url", ""))
+        model = env.get(model_key, role_cfg.get("model", ""))
+        backend = role_cfg.get("backend", "local")
+        if mode == "remote":
+            backend = "remote"
+        elif mode == "mixed":
+            backend = "remote" if remote_url else backend
+        else:
+            backend = "local"
+        role_cfg.update(
+            {
+                "backend": backend,
+                "remote_url": remote_url,
+                "model": model,
+                "api_key": role_cfg.get("api_key", ""),
+            }
+        )
+        roles[role] = role_cfg
+    inference["roles"] = roles
+    data["inference"] = inference
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
+
 def set_restore_remote(url: str) -> None:
     # Deprecated: git-based restore removed. Keep for backward compatibility.
     return None
@@ -95,7 +145,7 @@ def install_rlm() -> None:
     # Install from github (latest)
     run([py, "-m", "pip", "install", "-U", "git+https://github.com/alexzhang13/rlm.git"], check=False)
 
-def download_models(hint: str) -> None:
+def download_models(hint: str, roles_to_download: set[str]) -> None:
     py = str(venv_python())
     cfg = yaml.safe_load((ROOT/"configs"/"config.yaml").read_text())
     models_dir = ROOT/"models"
@@ -105,6 +155,8 @@ def download_models(hint: str) -> None:
     # Base models
     models_cfg = cfg.get("models", {})
     for role in ["reasoner", "coder", "vlm"]:
+        if role not in roles_to_download:
+            continue
         m = models_cfg.get(role) or {}
         if role == "vlm" and not m.get("enabled", False):
             continue
@@ -115,6 +167,8 @@ def download_models(hint: str) -> None:
     # Additional local options
     registry = (cfg.get("model_registry") or {})
     for role in ["reasoner", "coder", "vlm"]:
+        if role not in roles_to_download:
+            continue
         options = (registry.get(role) or {}).get("options") or []
         for opt in options:
             if opt.get("provider") != "local":
@@ -138,6 +192,22 @@ def start_server() -> None:
     py = str(venv_python())
     run([py, "-m", "uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8010"])
 
+def roles_to_download(mode: str, cfg: dict) -> set[str]:
+    roles_to_download: set[str] = set()
+    inference = cfg.get("inference", {}) or {}
+    roles_cfg = inference.get("roles", {}) or {}
+    for role in ["reasoner", "coder", "vlm"]:
+        backend = (roles_cfg.get(role, {}) or {}).get("backend", "local")
+        if mode == "local":
+            roles_to_download.add(role)
+        elif mode == "remote":
+            continue
+        else:
+            if backend == "local":
+                roles_to_download.add(role)
+    return roles_to_download
+
+
 def main():
     print("="*60)
     print("Local Code Agent - VM Bootstrap")
@@ -148,12 +218,19 @@ def main():
         install_rlm()
     except Exception:
         print("[WARN] RLM install failed; continuing")
-    vram = ask_vram_gb()
-    hint = choose_quant_hint(vram)
-    print(f"[INFO] Using quant hint: {hint}")
-    set_config_quant(hint)
-    print("Snapshot restore is local-only (no git). Use the UI History tab to create/restore snapshots.")
-    download_models(hint)
+    mode = ask_inference_mode()
+    set_inference_config(mode)
+    cfg = yaml.safe_load((ROOT/"configs"/"config.yaml").read_text())
+    roles_to_download = roles_to_download(mode, cfg)
+    if roles_to_download:
+        vram = ask_vram_gb()
+        hint = choose_quant_hint(vram)
+        print(f"[INFO] Using quant hint: {hint}")
+        set_config_quant(hint)
+        print("Snapshot restore is local-only (no git). Use the UI History tab to create/restore snapshots.")
+        download_models(hint, roles_to_download)
+    else:
+        print("[INFO] Remote inference enabled; skipping local model downloads.")
     print("[READY] Starting server at http://localhost:8010/docs")
     start_server()
 

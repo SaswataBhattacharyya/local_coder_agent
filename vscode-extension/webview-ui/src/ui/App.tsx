@@ -25,6 +25,7 @@ type AgentState = {
   repoRoot?: string;
   repoRootStateless?: boolean;
   repoRootRequested?: string;
+  inferenceConfig?: any;
 };
 
 type ImagePreview = { name: string; data: string };
@@ -59,6 +60,14 @@ export const App: React.FC = () => {
     filename_hint: "Q4_K_M",
     download_now: true,
   });
+  const [inferenceForm, setInferenceForm] = useState<any>({
+    mode: "local",
+    roles: {
+      reasoner: { backend: "local", remote_url: "", model: "", api_key: "" },
+      coder: { backend: "local", remote_url: "", model: "", api_key: "" },
+      vlm: { backend: "local", remote_url: "", model: "", api_key: "" },
+    },
+  });
 
   const diffFiles = useMemo<DiffFile[]>(() => {
     if (!state.pending?.diff) return [];
@@ -81,6 +90,12 @@ export const App: React.FC = () => {
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
   }, []);
+
+  useEffect(() => {
+    if (state.inferenceConfig) {
+      setInferenceForm(state.inferenceConfig);
+    }
+  }, [state.inferenceConfig]);
 
   const send = () => {
     const input = document.getElementById("input") as HTMLTextAreaElement | null;
@@ -322,6 +337,98 @@ export const App: React.FC = () => {
                 <select disabled>
                   <option>No plugins installed</option>
                 </select>
+              </div>
+              <h3>Inference</h3>
+              <div className="field">
+                <label>Mode</label>
+                <select
+                  value={inferenceForm.mode || "local"}
+                  onChange={(e) => setInferenceForm({ ...inferenceForm, mode: e.target.value })}
+                >
+                  <option value="local">Local</option>
+                  <option value="remote">Remote</option>
+                  <option value="mixed">Mixed</option>
+                </select>
+              </div>
+              {(["reasoner", "coder", "vlm"] as const).map((role) => (
+                <div key={role} className="inference-role">
+                  <div className="muted">{role.toUpperCase()}</div>
+                  <div className="field">
+                    <label>Backend</label>
+                    <select
+                      value={inferenceForm.roles?.[role]?.backend || "local"}
+                      onChange={(e) =>
+                        setInferenceForm({
+                          ...inferenceForm,
+                          roles: {
+                            ...inferenceForm.roles,
+                            [role]: { ...inferenceForm.roles?.[role], backend: e.target.value },
+                          },
+                        })
+                      }
+                    >
+                      <option value="local">Local</option>
+                      <option value="remote">Remote</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Remote URL</label>
+                    <input
+                      value={inferenceForm.roles?.[role]?.remote_url || ""}
+                      onChange={(e) =>
+                        setInferenceForm({
+                          ...inferenceForm,
+                          roles: {
+                            ...inferenceForm.roles,
+                            [role]: { ...inferenceForm.roles?.[role], remote_url: e.target.value },
+                          },
+                        })
+                      }
+                      placeholder="http://127.0.0.1:18080/v1/chat/completions"
+                    />
+                  </div>
+                  <div className="field">
+                    <label>Model</label>
+                    <input
+                      value={inferenceForm.roles?.[role]?.model || ""}
+                      onChange={(e) =>
+                        setInferenceForm({
+                          ...inferenceForm,
+                          roles: {
+                            ...inferenceForm.roles,
+                            [role]: { ...inferenceForm.roles?.[role], model: e.target.value },
+                          },
+                        })
+                      }
+                      placeholder="model name"
+                    />
+                  </div>
+                  <div className="field">
+                    <label>API Key (optional)</label>
+                    <input
+                      value={inferenceForm.roles?.[role]?.api_key || ""}
+                      onChange={(e) =>
+                        setInferenceForm({
+                          ...inferenceForm,
+                          roles: {
+                            ...inferenceForm.roles,
+                            [role]: { ...inferenceForm.roles?.[role], api_key: e.target.value },
+                          },
+                        })
+                      }
+                      placeholder="leave blank if not needed"
+                    />
+                  </div>
+                </div>
+              ))}
+              <div className="row">
+                <button
+                  onClick={() => {
+                    vscode?.postMessage({ type: "action", action: "saveInference", ...inferenceForm });
+                  }}
+                >
+                  Save Inference
+                </button>
               </div>
             </div>
           )}

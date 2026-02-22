@@ -28,6 +28,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
   private repoRoot: string = "";
   private repoRootStateless: boolean = false;
   private repoRootRequested: string = "";
+  private inferenceConfig: any = null;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -77,6 +78,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     this.repoRootStateless = Boolean(res.data.repo_root_stateless);
     this.repoRootRequested = res.data.requested_repo_root || root;
     await this.loadModels(false);
+    await this.loadInferenceConfig();
     await this.snapshotsRefresh();
     await this.refreshIndexStatus();
     this.refresh();
@@ -132,6 +134,10 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       if ((res.data as any).metrics) {
         const m = (res.data as any).metrics;
         this.pushProgress(`Metrics: in=${m.input_tokens} tok, out=${m.output_tokens} tok, chunks=${m.chunks_retrieved}`, "done");
+      }
+      if ((res.data as any).facts) {
+        const f = (res.data as any).facts;
+        this.pushProgress(`Facts: read=${f.files_read} files, bytes=${f.context_bytes}, backend=${f.backend}`, "done");
       }
       this.messages.push({ role: "assistant", text: res.data.answer, timestamp: Date.now() });
       this.refresh();
@@ -241,6 +247,17 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
       this.refresh();
       return;
     }
+    if (eventName === "facts") {
+      try {
+        const facts = JSON.parse(data);
+        const line = `Facts: read=${facts.files_read} files, bytes=${facts.context_bytes}, backend=${facts.backend}`;
+        this.pushProgress(line, "done");
+      } catch {
+        this.pushProgress(`Facts: ${data}`, "done");
+      }
+      this.refresh();
+      return;
+    }
     if (eventName === "error") {
       this.messages.push({ role: "assistant", text: data, timestamp: Date.now() });
       this.refresh();
@@ -307,6 +324,9 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
         break;
       case "removeModel":
         await this.removeModel(payload);
+        break;
+      case "saveInference":
+        await this.saveInferenceConfig(payload);
         break;
     }
   }
@@ -739,6 +759,24 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
     this.refresh();
   }
 
+  private async loadInferenceConfig(): Promise<void> {
+    const res = await this.api.get<any>("/inference/config");
+    if (!res.ok) {
+      return;
+    }
+    this.inferenceConfig = res.data;
+  }
+
+  private async saveInferenceConfig(payload: any): Promise<void> {
+    const res = await this.api.post<any>("/inference/config", payload);
+    if (!res.ok) {
+      vscode.window.showErrorMessage(`Update inference config failed: ${res.error}`);
+      return;
+    }
+    await this.loadInferenceConfig();
+    this.refresh();
+  }
+
   private async selectModel(role: "reasoner" | "coder", modelId: string): Promise<void> {
     const res = await this.api.post<any>("/models/select", { role, model_id: modelId });
     if (!res.ok) {
@@ -793,6 +831,7 @@ class AgentViewProvider implements vscode.WebviewViewProvider {
         repoRoot: this.repoRoot,
         repoRootStateless: this.repoRootStateless,
         repoRootRequested: this.repoRootRequested,
+        inferenceConfig: this.inferenceConfig,
       });
     }
   }

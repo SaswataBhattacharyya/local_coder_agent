@@ -59,6 +59,9 @@ class AgentViewProvider {
         this.indexStatus = null;
         this.indexPoller = null;
         this.lastIndexEventId = 0;
+        this.repoRoot = "";
+        this.repoRootStateless = false;
+        this.repoRootRequested = "";
     }
     resolveWebviewView(view) {
         this.view = view;
@@ -101,6 +104,9 @@ class AgentViewProvider {
             return;
         }
         this.status = "Connected";
+        this.repoRoot = res.data.repo_root || "";
+        this.repoRootStateless = Boolean(res.data.repo_root_stateless);
+        this.repoRootRequested = res.data.requested_repo_root || root;
         await this.loadModels(false);
         await this.snapshotsRefresh();
         await this.refreshIndexStatus();
@@ -801,6 +807,9 @@ class AgentViewProvider {
                 ingestStatusText: this.ingestStatusText,
                 progress: this.progress,
                 indexStatus: this.indexStatus,
+                repoRoot: this.repoRoot,
+                repoRootStateless: this.repoRootStateless,
+                repoRootRequested: this.repoRootRequested,
             });
         }
     }

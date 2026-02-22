@@ -30,6 +30,37 @@ Optional one-shot local start (server + UI):
 
 ## VM / Runpod Mode
 
+### Recommended (Cursor-like): Local Server + VM Inference
+
+This keeps **file I/O local** and uses VM GPU only for inference.
+
+1. Start the local agent server:
+```bash
+./scripts/start_server_local.sh
+```
+
+2. On the VM, start vLLM (OpenAI-compatible):
+```bash
+./scripts/start_vm_vllm.sh
+```
+
+3. Locally open tunnels to the VM:
+```bash
+LOCAL_CODE_AGENT_VM_HOST=<vm-ip> LOCAL_CODE_AGENT_VM_SSH_PORT=<port> ./scripts/start_vm_tunnel.sh
+```
+
+4. In VS Code Settings → Inference:
+- Mode: `remote` (or `mixed`)
+- Reasoner/Coder/VLM backend: `remote`
+- Remote URL(s): `http://127.0.0.1:18080/v1/chat/completions` etc.
+- Model: your vLLM model name(s)
+
+No repo mounting/rsync required.
+
+### Legacy (Server on VM)
+
+If you still want the server on the VM:
+
 1. Run on the VM/Runpod:
 
 ```bash

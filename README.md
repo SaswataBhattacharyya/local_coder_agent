@@ -26,6 +26,11 @@ One-shot local (server + VSCode UI):
 ./scripts/start_local.sh
 ```
 
+Local server only (no UI):
+```bash
+./scripts/start_server_local.sh
+```
+
 ## Restore Remote (Optional)
 - Snapshot endpoints:
   - `GET /snapshots`
@@ -41,6 +46,48 @@ Then set VSCode setting:
 See `docs/SETUP.md` for the step-by-step interactive guide, including:
 - Public endpoint (expose port 8010)
 - SSH tunnel (keep serverUrl as `http://127.0.0.1:8010`)
+
+## Remote Inference (VM GPU, Local Server)
+Run the agent server locally (so it can read your repo), and point inference to the VM:
+
+1. Start local server:
+```bash
+python3 bootstrap.py
+```
+
+2. Start a model server on the VM (OpenAI-compatible API). Examples:
+```bash
+# vLLM OpenAI server (example)
+python -m vllm.entrypoints.openai.api_server --model <model_name> --host 0.0.0.0 --port 8000
+
+# llama.cpp server (example)
+./server -m /path/to/model.gguf --host 0.0.0.0 --port 8000
+```
+
+3. Port-forward (from local machine):
+```bash
+ssh -L 18080:127.0.0.1:8000 root@<vm-ip> -p <port> -i ~/.ssh/id_ed25519
+```
+
+4. In VS Code Settings → Inference:
+   - Mode: `remote` or `mixed`
+   - Role backend: `remote`
+   - Remote URL: `http://127.0.0.1:18080/v1/chat/completions`
+   - Model: `<model_name>`
+
+This keeps all file ops local but uses the VM GPU for inference.
+
+Quick scripts:
+```bash
+# local
+./scripts/start_server_local.sh
+
+# on VM
+./scripts/start_vm_vllm.sh
+
+# local tunnel
+LOCAL_CODE_AGENT_VM_HOST=<vm-ip> LOCAL_CODE_AGENT_VM_SSH_PORT=<port> ./scripts/start_vm_tunnel.sh
+```
 
 ## VSCode Extension
 The extension lives in `vscode-extension/` and provides a right sidebar agent UI.

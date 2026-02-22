@@ -8,9 +8,70 @@ from agent.providers import OpenAIChatProvider, GeminiChatProvider
 from agent.llm_runtime import LlamaVLMRuntime, find_gguf_model
 from rlm_wrap.runtime import RLMChatRuntime
 from rlm_wrap.store import RLMVarStore
+from agent.inference_backend import RemoteOpenAIBackend
 
 
-def chat(role: str, messages: List[Dict[str, str]], config, repo_root: Path, config_path: Path | None = None) -> str:
+def _role_backend(role: str, config) -> tuple[str, dict]:
+    inf = getattr(config, "inference", None)
+    if not inf:
+        return "local", {}
+    mode = (inf.mode or "local").lower()
+    roles = getattr(inf, "roles", {}) or {}
+    role_cfg = roles.get(role)
+    backend = "local"
+    if isinstance(role_cfg, dict):
+        backend = (role_cfg.get("backend") or backend).lower()
+    elif role_cfg is not None:
+        backend = (getattr(role_cfg, "backend", backend) or backend).lower()
+    if mode == "remote":
+        backend = "remote"
+    elif mode == "mixed":
+        backend = backend or "local"
+    else:
+        backend = "local"
+    return backend, role_cfg or {}
+
+
+def backend_for_role(role: str, config) -> str:
+    backend, _ = _role_backend(role, config)
+    return backend
+
+
+def _remote_backend_for_role(role: str, config) -> RemoteOpenAIBackend:
+    backend, role_cfg = _role_backend(role, config)
+    if backend != "remote":
+        raise RuntimeError("remote backend requested but role not configured for remote")
+    remote_url = ""
+    model = ""
+    api_key = ""
+    if isinstance(role_cfg, dict):
+        remote_url = role_cfg.get("remote_url", "")
+        model = role_cfg.get("model", "")
+        api_key = role_cfg.get("api_key", "")
+    else:
+        remote_url = getattr(role_cfg, "remote_url", "")
+        model = getattr(role_cfg, "model", "")
+        api_key = getattr(role_cfg, "api_key", "")
+    if not remote_url:
+        raise RuntimeError(f"remote_url not configured for role: {role}")
+    if not model:
+        # fallback: use default local model id if set
+        model = getattr(getattr(config, role, None), "repo_id", "") or role
+    return RemoteOpenAIBackend(base_url=remote_url, model=model, api_key=api_key)
+
+
+def _has_local_model(role: str, config, repo_root: Path, config_path: Path | None = None) -> bool:
+    try:
+        model = resolve_model(role, config, repo_root, config_path=config_path)
+        if model.provider != "local" or not model.model_dir:
+            return False
+        model_path = find_gguf_model(Path(config.paths.models_dir) / model.model_dir, model.filename_hint or "")
+        return bool(model_path and Path(model_path).exists())
+    except Exception:
+        return False
+
+
+def _local_chat(role: str, messages: List[Dict[str, str]], config, repo_root: Path, config_path: Path | None = None) -> str:
     model = resolve_model(role, config, repo_root, config_path=config_path)
     if model.provider == "local":
         if not model.model_dir:
@@ -49,7 +110,21 @@ def chat(role: str, messages: List[Dict[str, str]], config, repo_root: Path, con
     raise RuntimeError(f"unknown provider: {model.provider}")
 
 
-def chat_with_images(role: str, messages: List[Dict[str, str]], images: List[Dict[str, str]], config, repo_root: Path, config_path: Path | None = None) -> str:
+def chat(role: str, messages: List[Dict[str, str]], config, repo_root: Path, config_path: Path | None = None) -> str:
+    backend, _ = _role_backend(role, config)
+    if backend == "remote":
+        remote = _remote_backend_for_role(role, config)
+        try:
+            return remote.chat(messages)
+        except Exception as exc:
+            if _has_local_model(role, config, repo_root, config_path=config_path):
+                return _local_chat(role, messages, config, repo_root, config_path=config_path)
+            raise RuntimeError(f"Remote inference failed for {role}: {exc}")
+    return _local_chat(role, messages, config, repo_root, config_path=config_path)
+
+
+def _local_chat_with_images(role: str, messages: List[Dict[str, str]], images: List[Dict[str, str]], config, repo_root: Path, config_path: Path | None = None) -> str:
+    backend, _ = _role_backend(role, config)
     model = resolve_model(role, config, repo_root, config_path=config_path)
     if model.provider == "local":
         if not model.model_dir:
@@ -90,3 +165,16 @@ def chat_with_images(role: str, messages: List[Dict[str, str]], images: List[Dic
         provider = GeminiChatProvider(api_key=key)
         return provider.chat_with_images(messages, images, model=model.model or "gemini-2.5-flash")
     raise RuntimeError(f"unknown provider: {model.provider}")
+
+
+def chat_with_images(role: str, messages: List[Dict[str, str]], images: List[Dict[str, str]], config, repo_root: Path, config_path: Path | None = None) -> str:
+    backend, _ = _role_backend(role, config)
+    if backend == "remote":
+        remote = _remote_backend_for_role(role, config)
+        try:
+            return remote.chat_with_images(messages, images)
+        except Exception as exc:
+            if _has_local_model(role, config, repo_root, config_path=config_path):
+                return _local_chat_with_images(role, messages, images, config, repo_root, config_path=config_path)
+            raise RuntimeError(f"Remote inference failed for {role}: {exc}")
+    return _local_chat_with_images(role, messages, images, config, repo_root, config_path=config_path)

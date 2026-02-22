@@ -57,6 +57,7 @@ export async function gatherContext(): Promise<ContextBundle> {
 const MAX_FILE_CHARS = 12000;
 const MAX_TREE_ENTRIES = 300;
 const MAX_EXTRA_FILES = 30;
+const MAX_TOTAL_CHARS = 200000;
 
 export async function gatherWorkspaceContext(
   depth: "shallow" | "standard" | "deep" = "standard",
@@ -178,11 +179,16 @@ export async function gatherWorkspaceContext(
   }
 
   const scripts: Record<string, string> = {};
+  let totalChars = 0;
   for (const uri of toRead) {
     try {
       const data = await vscode.workspace.fs.readFile(uri);
       const text = new TextDecoder("utf-8").decode(data).slice(0, MAX_FILE_CHARS);
+      if (totalChars + text.length > MAX_TOTAL_CHARS) {
+        break;
+      }
       files.push({ path: uri.fsPath, content: text });
+      totalChars += text.length;
       if (uri.path.endsWith("package.json")) {
         try {
           const pkg = JSON.parse(text);

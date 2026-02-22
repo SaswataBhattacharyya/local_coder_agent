@@ -35,6 +35,18 @@ class RuntimeCfg:
     multi_step_max_passes: int = 2
 
 @dataclass
+class InferenceRoleCfg:
+    backend: str = "local"  # local | remote
+    remote_url: str = ""
+    model: str = ""
+    api_key: str = ""
+
+@dataclass
+class InferenceCfg:
+    mode: str = "local"  # local | remote | mixed
+    roles: dict = field(default_factory=dict)
+
+@dataclass
 class RestoreCfg:
     remote_url: str = ""
     remote_name: str = "agent-restore"
@@ -58,6 +70,7 @@ class AppConfig:
     restore: RestoreCfg
     model_registry: dict
     context_ingest: ContextIngestCfg
+    inference: InferenceCfg
 
 def load_config(path: Path) -> AppConfig:
     data = yaml.safe_load(path.read_text())
@@ -74,4 +87,11 @@ def load_config(path: Path) -> AppConfig:
     restore = RestoreCfg(**data.get("restore", {}))
     model_registry = data.get("model_registry", {})
     context_ingest = ContextIngestCfg(**data.get("context_ingest", {}))
-    return AppConfig(paths=paths, reasoner=reasoner, coder=coder, vlm=vlm, runtime=runtime, restore=restore, model_registry=model_registry, context_ingest=context_ingest)
+    inf_raw = data.get("inference", {}) or {}
+    roles_raw = inf_raw.get("roles", {}) or {}
+    inf_roles = {}
+    for role, cfg in roles_raw.items():
+        if isinstance(cfg, dict):
+            inf_roles[role] = InferenceRoleCfg(**cfg)
+    inference = InferenceCfg(mode=inf_raw.get("mode", "local"), roles=inf_roles)
+    return AppConfig(paths=paths, reasoner=reasoner, coder=coder, vlm=vlm, runtime=runtime, restore=restore, model_registry=model_registry, context_ingest=context_ingest, inference=inference)

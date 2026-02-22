@@ -70,6 +70,13 @@ body {
   cursor: pointer;
 }
 
+.inference-role {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  margin: 8px 0;
+}
+
 .controls button:hover { background: #1d232b; }
 
 .panel-area {

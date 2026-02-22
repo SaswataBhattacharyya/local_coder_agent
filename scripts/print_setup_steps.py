@@ -9,6 +9,11 @@ def main() -> None:
     print("=" * 60)
     if is_runpod:
         print("Detected Runpod/VM environment. Choose one:")
+        print("Recommended (Cursor-like):")
+        print("   - Run local server: ./scripts/start_server_local.sh")
+        print("   - On VM run: ./scripts/start_vm_vllm.sh")
+        print("   - On local run: ./scripts/start_vm_tunnel.sh")
+        print("   - In VSCode Settings → Inference set mode=remote and URLs")
         print("A) Public endpoint:")
         print("   - Expose port 8010 in your Runpod UI.")
         print("   - Set VSCode setting localCodeAgent.serverUrl to https://<runpod-url>")
@@ -18,7 +23,7 @@ def main() -> None:
         print("   - Set serverUrl to http://127.0.0.1:8010")
     else:
         print("Local mode:")
-        print("1) Run: python3 bootstrap.py")
+        print("1) Run: ./scripts/start_server_local.sh")
         print("2) Set VSCode setting localCodeAgent.serverUrl to http://127.0.0.1:8010")
 
 

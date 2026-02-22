@@ -16,7 +16,22 @@ SUPPORTED = {
     ".yml": "yaml",
 }
 
-EXCLUDE_DIRS = {".git", "node_modules", "venv", ".venv", "dist", "build", "__pycache__", ".agent", ".agent_index", ".agent_staging"}
+EXCLUDE_DIRS = {
+    ".git",
+    "node_modules",
+    "venv",
+    ".venv",
+    "dist",
+    "build",
+    ".next",
+    ".vite",
+    ".cache",
+    "__pycache__",
+    ".agent",
+    ".agent_index",
+    ".agent_staging",
+    "models",
+}
 @dataclass
 class SymbolIndexer:
     repo_root: Path

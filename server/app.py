@@ -13,6 +13,7 @@ import sqlite3
 import shutil
 import hashlib
 import threading
+import yaml
 
 class TraceSpan:
     def __init__(self, name: str) -> None:
@@ -58,7 +59,7 @@ from agent.planner import QueryPlanner
 from agent.info_pipeline import generate_info_answer, generate_info_answer_from_context
 from agent.state import AgentSession, AgentState
 from agent.pipeline import propose_patch, revise_pending_patch
-from agent.llm_router import chat as llm_chat, chat_with_images
+from agent.llm_router import chat as llm_chat, chat_with_images, backend_for_role
 from agent.model_registry import list_models, set_selected
 from agent.context_ingest import ingest_and_store
 from rlm_wrap.store import RLMVarStore
@@ -127,6 +128,10 @@ class ModelAddRequest(BaseModel):
 class ModelRemoveRequest(BaseModel):
     role: str
     model_ids: list[str]
+
+class InferenceConfigRequest(BaseModel):
+    mode: str
+    roles: dict
 
 class SessionStartRequest(BaseModel):
     repo_root: str
@@ -393,6 +398,7 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
         except Exception:
             plan = result.plan
     answer = None
+    facts = None
     if result.state == "READY" and result.intent == "INFO":
         try:
             workspace_ctx = req.workspace_context
@@ -401,6 +407,14 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
                 parts, metrics = _llm_info_answer_with_continuation_and_metrics(workspace_ctx, max_parts=3)
                 span.finish()
                 answer = "\n".join([p.replace("<CONTINUE>", "").replace("<END>", "") for p in parts]).strip()
+                files_read = len(workspace_ctx.get("files") or [])
+                bytes_read = sum([len((f.get("content") or "")) for f in (workspace_ctx.get("files") or [])])
+                facts = {
+                    "files_read": files_read,
+                    "context_bytes": bytes_read,
+                    "chunks_retrieved": metrics.get("chunks_retrieved") if metrics else 0,
+                    "backend": backend_for_role("reasoner", CONFIG),
+                }
             else:
                 repo_root = str(STATE["repo_root"])
                 if ".agent_stateless" in repo_root:
@@ -416,10 +430,17 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
                     _build_repo_map(full=False)
                     span.finish()
                     span = trace.span("info_pipeline")
-                    repo_ctx = _build_repo_context_bundle(user_text, Path(STATE["repo_root"]), STATE["indexer"])
+                    repo_ctx, stats = _build_repo_context_bundle(user_text, Path(STATE["repo_root"]), STATE["indexer"])
                     parts, metrics = _llm_info_answer_with_continuation_and_metrics(repo_ctx, max_parts=3)
                     span.finish()
                     answer = "\n".join([p.replace("<CONTINUE>", "").replace("<END>", "") for p in parts]).strip()
+                    facts = {
+                        "files_read": stats.get("files_read", 0),
+                        "files_considered": stats.get("files_considered", 0),
+                        "context_bytes": stats.get("context_bytes", 0),
+                        "chunks_retrieved": stats.get("chunks_retrieved", 0),
+                        "backend": backend_for_role("reasoner", CONFIG),
+                    }
         except Exception as exc:
             answer = f"Unable to generate summary: {exc}"
     return {
@@ -427,6 +448,7 @@ def _handle_query(req: QueryRequest, trace: TraceContext) -> dict:
         "questions": result.questions,
         "plan": plan,
         "answer": answer,
+        "facts": facts,
         "metrics": locals().get("metrics"),
         "trace": trace.to_dict(),
         "use_mcp": result.use_mcp,
@@ -553,18 +575,22 @@ def _repo_signature(indexer: SymbolIndexer) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolIndexer) -> dict:
+def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolIndexer) -> tuple[dict, dict]:
     cfg = CONFIG.context_ingest
     n_ctx = CONFIG.reasoner.context or 8192
     max_chars = max(cfg.max_chars, int(n_ctx * 4 * 0.8))
     files: list[dict] = []
     seen: set[str] = set()
+    files_considered = 0
+    bytes_read = 0
 
     readme = _find_readme(repo_root)
     if readme:
         content = _read_file_snippet(readme, max_chars=12000)
         files.append({"path": str(readme.relative_to(repo_root)), "content": content})
         seen.add(str(readme.relative_to(repo_root)))
+        files_considered += 1
+        bytes_read += len(content or "")
 
     pkg_path = repo_root / "package.json"
     package_scripts = {}
@@ -572,6 +598,8 @@ def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolI
         pkg_text = _read_file_snippet(pkg_path, max_chars=12000)
         files.append({"path": "package.json", "content": pkg_text})
         seen.add("package.json")
+        files_considered += 1
+        bytes_read += len(pkg_text or "")
         try:
             data = json.loads(pkg_text)
             package_scripts = data.get("scripts") or {}
@@ -581,8 +609,11 @@ def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolI
     for fname in ["pyproject.toml", "requirements.txt", "Pipfile", "Cargo.toml", "go.mod", "Makefile", "docker-compose.yml", "docker-compose.yaml", "vite.config.ts", "next.config.js"]:
         path = repo_root / fname
         if path.exists() and path.is_file() and fname not in seen:
-            files.append({"path": fname, "content": _read_file_snippet(path, max_chars=6000)})
+            content = _read_file_snippet(path, max_chars=6000)
+            files.append({"path": fname, "content": content})
             seen.add(fname)
+            files_considered += 1
+            bytes_read += len(content or "")
 
     # Entry points
     for path in [
@@ -598,8 +629,11 @@ def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolI
     ]:
         rel = str(path.relative_to(repo_root)) if path.exists() else ""
         if rel and rel not in seen:
-            files.append({"path": rel, "content": _read_file_snippet(path, max_chars=8000)})
+            content = _read_file_snippet(path, max_chars=8000)
+            files.append({"path": rel, "content": content})
             seen.add(rel)
+            files_considered += 1
+            bytes_read += len(content or "")
 
     repo_map = _load_repo_map() or {}
     top_modules = repo_map.get("top_modules") or []
@@ -609,8 +643,11 @@ def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolI
             continue
         full = repo_root / path
         if full.exists() and full.is_file():
-            files.append({"path": path, "content": _read_file_snippet(full, max_chars=8000)})
+            content = _read_file_snippet(full, max_chars=8000)
+            files.append({"path": path, "content": content})
             seen.add(path)
+            files_considered += 1
+            bytes_read += len(content or "")
 
     # If still small, add a few indexed files
     try:
@@ -623,8 +660,11 @@ def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolI
                 continue
             full = repo_root / path
             if full.exists() and full.is_file():
-                files.append({"path": path, "content": _read_file_snippet(full, max_chars=4000)})
+                content = _read_file_snippet(full, max_chars=4000)
+                files.append({"path": path, "content": content})
                 seen.add(path)
+                files_considered += 1
+                bytes_read += len(content or "")
             if len(files) >= 25:
                 break
     except Exception:
@@ -652,6 +692,7 @@ def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolI
         "snippets": [],
     }
 
+    chunks_retrieved = 0
     if cfg.enabled:
         store = RLMVarStore(repo_root=repo_root)
         signature = _repo_signature(indexer)
@@ -668,11 +709,20 @@ def _build_repo_context_bundle(user_text: str, repo_root: Path, indexer: SymbolI
             )
             store.set("repo_sig", signature)
             context["snippets"] = [{"path": "ingest", "text": ch} for ch in result.top_chunks]
+            chunks_retrieved = len(result.top_chunks)
         else:
             top_chunks = store.load().get("context_chunks", [])[: cfg.top_k]
             context["snippets"] = [{"path": "ingest", "text": ch} for ch in top_chunks]
+            chunks_retrieved = len(top_chunks)
 
-    return context
+    stats = {
+        "files_considered": files_considered,
+        "files_read": len(trimmed),
+        "context_bytes": sum([len(f.get("content") or "") for f in trimmed]),
+        "bytes_read": bytes_read,
+        "chunks_retrieved": chunks_retrieved,
+    }
+    return context, stats
 
 
 def _llm_info_answer_with_continuation_and_metrics(ctx: dict, max_parts: int = 3) -> tuple[list[str], dict]:
@@ -859,7 +909,14 @@ def query_stream(req: QueryRequest):
             for part in parts:
                 clean = part.replace("<CONTINUE>", "").replace("<END>", "")
                 yield from _stream_text("answer", clean)
+            facts = {
+                "files_read": len(req.workspace_context.get("files") or []),
+                "context_bytes": sum([len((f.get("content") or "")) for f in (req.workspace_context.get("files") or [])]),
+                "chunks_retrieved": metrics.get("chunks_retrieved") if metrics else 0,
+                "backend": backend_for_role("reasoner", CONFIG),
+            }
             yield _sse_event("metrics", json.dumps(metrics))
+            yield _sse_event("facts", json.dumps(facts))
         elif result.get("answer"):
             text = result["answer"]
             if "<CONTINUE>" in text or "<END>" in text or _needs_continuation(text, max_stream):
@@ -871,6 +928,8 @@ def query_stream(req: QueryRequest):
                 yield from _stream_text("answer", text)
             if result.get("metrics"):
                 yield _sse_event("metrics", json.dumps(result["metrics"]))
+            if result.get("facts"):
+                yield _sse_event("facts", json.dumps(result["facts"]))
         elif result.get("questions"):
             yield from _stream_text("questions", "\n".join(result["questions"]))
         elif result.get("plan"):
@@ -1110,16 +1169,21 @@ def _touched_files(unified_diff: str) -> list[str]:
     return files
 
 
-def _context_bundle_to_text(context: dict | None) -> list[str]:
+def _context_bundle_to_text(context: dict | None, max_chars: int = 200000) -> list[str]:
     if not context:
         return []
     blocks: list[str] = []
+    total = 0
     files = context.get("files") or []
     for f in files:
         path = f.get("path", "unknown")
         content = f.get("content", "")
         if content:
-            blocks.append(f"[File] {path}\n{content}")
+            block = f"[File] {path}\n{content}"
+            if total + len(block) > max_chars:
+                break
+            blocks.append(block)
+            total += len(block)
     snippets = context.get("snippets") or []
     for s in snippets:
         path = s.get("path", "unknown")
@@ -1127,7 +1191,11 @@ def _context_bundle_to_text(context: dict | None) -> list[str]:
         end = s.get("endLine", "?")
         text = s.get("text", "")
         if text:
-            blocks.append(f"[Snippet] {path}:{start}-{end}\n{text}")
+            block = f"[Snippet] {path}:{start}-{end}\n{text}"
+            if total + len(block) > max_chars:
+                break
+            blocks.append(block)
+            total += len(block)
     return blocks
 
 
@@ -1696,10 +1764,23 @@ def get_models():
     if STATE["repo_root"] is None:
         raise HTTPException(400, "init first")
     repo_root = Path(STATE["repo_root"])
+    inf = CONFIG.inference
+    roles = {}
+    for role in ["reasoner", "coder", "vlm"]:
+        cfg = (inf.roles or {}).get(role)
+        if cfg is None:
+            roles[role] = {"backend": "local", "remote_url": "", "model": ""}
+            continue
+        roles[role] = {
+            "backend": getattr(cfg, "backend", "local"),
+            "remote_url": getattr(cfg, "remote_url", ""),
+            "model": getattr(cfg, "model", ""),
+        }
     return {
         "reasoner": list_models("reasoner", CONFIG, repo_root, CONFIG_PATH),
         "coder": list_models("coder", CONFIG, repo_root, CONFIG_PATH),
         "vlm": list_models("vlm", CONFIG, repo_root, CONFIG_PATH),
+        "inference": {"mode": inf.mode, "roles": roles},
     }
 
 @app.post("/models/select")
@@ -1783,6 +1864,43 @@ def remove_model(req: ModelRemoveRequest):
         if path.exists() and path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
     return {"status": "ok", "removed": [o.get("id") for o in removed]}
+
+
+@app.get("/inference/config")
+def get_inference_config():
+    inf = CONFIG.inference
+    roles = {}
+    for role in ["reasoner", "coder", "vlm"]:
+        cfg = (inf.roles or {}).get(role)
+        if cfg is None:
+            roles[role] = {"backend": "local", "remote_url": "", "model": "", "api_key": ""}
+            continue
+        roles[role] = {
+            "backend": getattr(cfg, "backend", "local"),
+            "remote_url": getattr(cfg, "remote_url", ""),
+            "model": getattr(cfg, "model", ""),
+            "api_key": getattr(cfg, "api_key", ""),
+        }
+    return {"mode": inf.mode, "roles": roles}
+
+
+@app.post("/inference/config")
+def set_inference_config(req: InferenceConfigRequest):
+    mode = (req.mode or "local").lower()
+    if mode not in ("local", "remote", "mixed"):
+        raise HTTPException(400, "mode must be local, remote, or mixed")
+    roles = req.roles or {}
+    for role in ["reasoner", "coder", "vlm"]:
+        cfg = roles.get(role, {})
+        backend = (cfg.get("backend") or "local").lower()
+        if backend not in ("local", "remote"):
+            raise HTTPException(400, f"invalid backend for {role}")
+    data = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+    data["inference"] = {"mode": mode, "roles": roles}
+    CONFIG_PATH.write_text(yaml.safe_dump(data, sort_keys=False))
+    global CONFIG
+    CONFIG = load_config(CONFIG_PATH)
+    return {"status": "ok"}
 
 class RunCommandRequest(BaseModel):
     command: str

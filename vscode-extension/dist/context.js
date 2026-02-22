@@ -60,7 +60,10 @@ async function gatherContext() {
     if (query) {
         const tasks = [];
         const ws = vscode.workspace;
-        await ws.findTextInFiles({ pattern: query }, { maxResults: 20 }, (result) => {
+        await ws.findTextInFiles({ pattern: query }, {
+            maxResults: 20,
+            filesToExclude: "**/{node_modules,.git,dist,build,.next,.vite,.cache,venv,.venv}/**",
+        }, (result) => {
             const docUri = result.uri;
             const start = Math.max(0, result.ranges[0].start.line - 4);
             const end = result.ranges[0].end.line + 4;

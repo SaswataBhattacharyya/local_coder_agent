@@ -12,7 +12,7 @@ models:
     filename_hint: Q4_K_M
     context: 8192
   vlm:
-    enabled: false
+    enabled: true
     repo_id: ggml-org/Qwen2.5-VL-7B-Instruct-GGUF
     filename_hint: Q4_K_M
     context: 4096
@@ -60,3 +60,21 @@ context_ingest:
   chunk_size: 2000
   chunk_overlap: 200
   top_k: 6
+inference:
+  mode: local
+  roles:
+    reasoner:
+      backend: local
+      remote_url: ""
+      model: ""
+      api_key: ""
+    coder:
+      backend: local
+      remote_url: ""
+      model: ""
+      api_key: ""
+    vlm:
+      backend: local
+      remote_url: ""
+      model: ""
+      api_key: ""
